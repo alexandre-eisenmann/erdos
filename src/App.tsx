@@ -49,11 +49,24 @@ function getDefaultLayoutChrome(): LayoutChrome {
   return { topPx: 140, containerHeightPx: window.innerHeight };
 }
 const MIN_SEGMENT_COUNT = 3;
-const MAX_SEGMENT_COUNT = 20;
+const MAX_SEGMENT_COUNT = 57;
 const DEFAULT_SEGMENT_COUNT = 5;
 
-const INITIAL_LAYOUT_MAX_ATTEMPTS = 200;
-const INITIAL_LAYOUT_MAX_RETRIES = 40;
+// U_TABLE[n] = u(n) = the number of segments for index n.
+const U_TABLE = [0, 0, 1, 3, 5, 7, 9, 12, 14, 18, 20, 23, 27, 30, 33, 37, 41, 43, 46, 50, 54, 57];
+
+// The piece count IS u(n), so invert the table to recover n: take the largest
+// index whose u(n) does not exceed the piece count (missing counts fall back to
+// the previous table value, i.e. u(n) = u(n-1)). Max dots = 2·u(n) − n.
+function getMaxDots(segmentCount: number): number {
+  let n = 0;
+  for (let i = 0; i < U_TABLE.length; i += 1) {
+    if (U_TABLE[i] <= segmentCount) {
+      n = i;
+    }
+  }
+  return Math.max(0, 2 * U_TABLE[n] - n);
+}
 
 type SegmentId = number;
 type HandleId = "start" | "end";
@@ -84,8 +97,6 @@ type PuzzleMetrics = {
   layoutMaxY: number;
   layoutMargin: number;
   layoutCols: number;
-  layoutHorizontalGap: number;
-  layoutVerticalGap: number;
 };
 
 type LayoutChrome = {
@@ -169,50 +180,35 @@ function lerp(start: number, end: number, progress: number) {
   return start + (end - start) * progress;
 }
 
-function chooseLayoutDimensions(
+// Largest 45° segment length, and the column count, that packs `segmentCount`
+// diagonal segments into the play area. A 45° segment occupies a square
+// bounding box of side L/√2 + 2·viewHandleRadius; spacing grid cells one box
+// (plus a separation gap) apart keeps neighbouring boxes from touching, so the
+// segments inside them can never overlap — no collision testing required. We
+// scan every column count and keep the one yielding the largest fitting
+// segment (which naturally balances the grid to the play area's aspect ratio).
+function chooseDiagonalGrid(
   segmentCount: number,
   playWidth: number,
   playHeight: number,
-  t: number,
-  bodyWidth: number,
   viewHandleRadius: number,
-  handleGap: number,
+  separation: number,
+  maxLength: number,
 ) {
-  const verticalGap = Math.max(
-    Math.round(lerp(18, 12, t)),
-    viewHandleRadius + 10,
-  );
-  const segmentHeight = viewHandleRadius * 2 + bodyWidth + 4;
-  const minLength = Math.round(lerp(200, 130, t));
-  const maxCols =
-    segmentCount <= 5 ? segmentCount : segmentCount <= 12 ? 4 : 5;
+  let best = { length: 0, cols: 1 };
 
-  let best = {
-    length: minLength,
-    cols: Math.min(segmentCount, maxCols),
-    horizontalGap: handleGap,
-    verticalGap,
-  };
-
-  for (let cols = maxCols; cols >= 3; cols -= 1) {
+  for (let cols = 1; cols <= segmentCount; cols += 1) {
     const rows = Math.ceil(segmentCount / cols);
-    const lengthFromWidth = (playWidth - (cols - 1) * handleGap) / cols;
-    const rowPitch = segmentHeight + verticalGap;
-    if (rows * rowPitch - verticalGap > playHeight + 1) {
-      continue;
-    }
-
-    const length = Math.round(Math.min(lengthFromWidth, 280));
-    if (length >= minLength) {
-      return { length, cols, horizontalGap: handleGap, verticalGap };
-    }
-
+    const boxByWidth = (playWidth - (cols - 1) * separation) / cols;
+    const boxByHeight = (playHeight - (rows - 1) * separation) / rows;
+    const box = Math.min(boxByWidth, boxByHeight);
+    const length = Math.SQRT2 * (box - 2 * viewHandleRadius);
     if (length > best.length) {
-      best = { length, cols, horizontalGap: handleGap, verticalGap };
+      best = { length, cols };
     }
   }
 
-  return best;
+  return { length: Math.min(maxLength, Math.max(0, best.length)), cols: best.cols };
 }
 
 function getPuzzleMetrics(
@@ -228,7 +224,7 @@ function getPuzzleMetrics(
   const bodyWidth = Math.round(lerp(28, 14, t));
   const handleRadius = Math.round(lerp(10, 7, t));
   const viewHandleRadius = handleRadius + 7;
-  const snapRadius = Math.round(lerp(54, 32, t));
+  const snapRadiusBase = Math.round(lerp(54, 32, t));
   const capStackStep = handleRadius * 2 + 6;
   const layoutMargin = Math.round(lerp(48, 32, t));
   const pileDotRadius = Math.max(10, Math.min(18, Math.round(canvas.height * 0.022)));
@@ -251,22 +247,20 @@ function getPuzzleMetrics(
   const playWidth = canvas.width - layoutMargin * 2;
   const playHeight = layoutMaxY - layoutMinY;
   const minSegmentSeparation = Math.round(lerp(28, 8, t));
-  const handleGap = Math.max(
-    Math.round(lerp(12, 10, t)),
-    viewHandleRadius * 2 + minSegmentSeparation + 4,
-  );
-  const layout = chooseLayoutDimensions(
+  const bodyHalfWidth = (bodyWidth + 6) / 2;
+  const collisionRadius = Math.max(bodyHalfWidth, viewHandleRadius) + 8;
+  const layout = chooseDiagonalGrid(
     segmentCount,
     playWidth,
     playHeight,
-    t,
-    bodyWidth,
     viewHandleRadius,
-    handleGap,
+    minSegmentSeparation,
+    280,
   );
   const length = layout.length;
-  const bodyHalfWidth = (bodyWidth + 6) / 2;
-  const collisionRadius = Math.max(bodyHalfWidth, viewHandleRadius) + 8;
+  // Segments shrink to fit large counts, so keep the snap radius from dwarfing a
+  // short segment (which would make every release snap and feel uncontrollable).
+  const snapRadius = Math.min(snapRadiusBase, Math.round(length * 0.6));
 
   return {
     canvasWidth: canvas.width,
@@ -288,8 +282,6 @@ function getPuzzleMetrics(
     layoutMaxY,
     layoutMargin,
     layoutCols: layout.cols,
-    layoutHorizontalGap: layout.horizontalGap,
-    layoutVerticalGap: layout.verticalGap,
   };
 }
 
@@ -320,516 +312,44 @@ function createInitialGameState(
   };
 }
 
-function randomInRange(min: number, max: number) {
-  return min + Math.random() * (max - min);
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function dot(first: Point, second: Point) {
-  return first.x * second.x + first.y * second.y;
-}
-
-function getSegmentEndpoints(pose: SegmentPose, length: number) {
-  return {
-    start: getSegmentHandlePoint(pose, length, "start"),
-    end: getSegmentHandlePoint(pose, length, "end"),
-  };
-}
-
-function pointToSegmentDistance(point: Point, segmentStart: Point, segmentEnd: Point) {
-  const segment = {
-    x: segmentEnd.x - segmentStart.x,
-    y: segmentEnd.y - segmentStart.y,
-  };
-  const toPoint = {
-    x: point.x - segmentStart.x,
-    y: point.y - segmentStart.y,
-  };
-  const segmentLengthSq = dot(segment, segment);
-  if (segmentLengthSq === 0) {
-    return Math.hypot(toPoint.x, toPoint.y);
-  }
-
-  const projection = clamp(dot(toPoint, segment) / segmentLengthSq, 0, 1);
-  const closest = {
-    x: segmentStart.x + projection * segment.x,
-    y: segmentStart.y + projection * segment.y,
-  };
-  return Math.hypot(point.x - closest.x, point.y - closest.y);
-}
-
-function getSegmentSegmentDistance(
-  firstStart: Point,
-  firstEnd: Point,
-  secondStart: Point,
-  secondEnd: Point,
-) {
-  const firstAxis = {
-    x: firstEnd.x - firstStart.x,
-    y: firstEnd.y - firstStart.y,
-  };
-  const secondAxis = {
-    x: secondEnd.x - secondStart.x,
-    y: secondEnd.y - secondStart.y,
-  };
-  const originOffset = {
-    x: firstStart.x - secondStart.x,
-    y: firstStart.y - secondStart.y,
-  };
-
-  const firstLengthSq = dot(firstAxis, firstAxis);
-  const secondLengthSq = dot(secondAxis, secondAxis);
-  const axisDot = dot(firstAxis, secondAxis);
-  const firstOffsetDot = dot(firstAxis, originOffset);
-  const secondOffsetDot = dot(secondAxis, originOffset);
-  const denominator = firstLengthSq * secondLengthSq - axisDot * axisDot;
-
-  let segmentNumerator = 0;
-  let segmentDenominator = denominator;
-  let otherNumerator = 0;
-  let otherDenominator = denominator;
-
-  if (denominator < 1e-12) {
-    segmentNumerator = 0;
-    segmentDenominator = 1;
-    otherNumerator = secondOffsetDot;
-    otherDenominator = secondLengthSq;
-  } else {
-    segmentNumerator = axisDot * secondOffsetDot - secondLengthSq * firstOffsetDot;
-    otherNumerator = firstLengthSq * secondOffsetDot - axisDot * firstOffsetDot;
-
-    if (segmentNumerator < 0) {
-      segmentNumerator = 0;
-      otherNumerator = secondOffsetDot;
-      otherDenominator = secondLengthSq;
-    } else if (segmentNumerator > segmentDenominator) {
-      segmentNumerator = segmentDenominator;
-      otherNumerator = secondOffsetDot + axisDot;
-      otherDenominator = secondLengthSq;
-    } else {
-      otherNumerator = firstLengthSq * secondOffsetDot - axisDot * firstOffsetDot;
-      if (otherNumerator < 0) {
-        otherNumerator = 0;
-        if (-firstOffsetDot < 0) {
-          segmentNumerator = 0;
-        } else if (-firstOffsetDot > firstLengthSq) {
-          segmentNumerator = firstLengthSq;
-        } else {
-          segmentNumerator = -firstOffsetDot;
-          segmentDenominator = firstLengthSq;
-        }
-      } else if (otherNumerator > otherDenominator) {
-        otherNumerator = otherDenominator;
-        if (axisDot - firstOffsetDot < 0) {
-          segmentNumerator = 0;
-        } else if (axisDot - firstOffsetDot > firstLengthSq) {
-          segmentNumerator = firstLengthSq;
-        } else {
-          segmentNumerator = axisDot - firstOffsetDot;
-          segmentDenominator = firstLengthSq;
-        }
-      }
-    }
-  }
-
-  const firstProgress =
-    Math.abs(segmentNumerator) < 1e-12 ? 0 : segmentNumerator / segmentDenominator;
-  const secondProgress =
-    Math.abs(otherNumerator) < 1e-12 ? 0 : otherNumerator / otherDenominator;
-  const closestOffset = {
-    x:
-      originOffset.x +
-      firstProgress * firstAxis.x -
-      secondProgress * secondAxis.x,
-    y:
-      originOffset.y +
-      firstProgress * firstAxis.y -
-      secondProgress * secondAxis.y,
-  };
-
-  return Math.hypot(closestOffset.x, closestOffset.y);
-}
-
-function getSampledBodyPoints(pose: SegmentPose, length: number) {
-  const { start, end } = getSegmentEndpoints(pose, length);
-  const samples: Point[] = [];
-
-  for (let index = 0; index <= 16; index += 1) {
-    const progress = index / 16;
-    samples.push({
-      x: start.x + (end.x - start.x) * progress,
-      y: start.y + (end.y - start.y) * progress,
-    });
-  }
-
-  return samples;
-}
-
-function segmentsOverlap(
-  firstPose: SegmentPose,
-  secondPose: SegmentPose,
-  metrics: PuzzleMetrics,
-) {
-  const first = getSegmentEndpoints(firstPose, metrics.length);
-  const second = getSegmentEndpoints(secondPose, metrics.length);
-  const handleGap = metrics.viewHandleRadius * 2 + metrics.minSegmentSeparation;
-  const bodyGap = metrics.collisionRadius * 2 + metrics.minSegmentSeparation;
-
-  const handlePairs = [
-    [first.start, second.start],
-    [first.start, second.end],
-    [first.end, second.start],
-    [first.end, second.end],
-  ] as const;
-
-  for (const [firstHandle, secondHandle] of handlePairs) {
-    if (getDistance(firstHandle, secondHandle) < handleGap) {
-      return true;
-    }
-  }
-
-  const bodyDistance = getSegmentSegmentDistance(
-    first.start,
-    first.end,
-    second.start,
-    second.end,
-  );
-  if (bodyDistance < bodyGap) {
-    return true;
-  }
-
-  for (const handle of [first.start, first.end]) {
-    if (pointToSegmentDistance(handle, second.start, second.end) < handleGap) {
-      return true;
-    }
-  }
-
-  for (const handle of [second.start, second.end]) {
-    if (pointToSegmentDistance(handle, first.start, first.end) < handleGap) {
-      return true;
-    }
-  }
-
-  for (const sample of getSampledBodyPoints(firstPose, metrics.length)) {
-    if (pointToSegmentDistance(sample, second.start, second.end) < bodyGap) {
-      return true;
-    }
-  }
-
-  for (const sample of getSampledBodyPoints(secondPose, metrics.length)) {
-    if (pointToSegmentDistance(sample, first.start, first.end) < bodyGap) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function isPoseWithinCanvas(pose: SegmentPose, metrics: PuzzleMetrics) {
-  const { start, end } = getSegmentEndpoints(pose, metrics.length);
-  const margin = metrics.layoutMargin + metrics.viewHandleRadius;
-  const points = [pose.center, start, end];
-
-  return points.every(
-    (point) =>
-      point.x >= margin &&
-      point.x <= metrics.canvasWidth - margin &&
-      point.y >= metrics.layoutMinY + metrics.viewHandleRadius &&
-      point.y <= metrics.layoutMaxY - metrics.viewHandleRadius,
-  );
-}
-
-function hasAnySegmentOverlap(segments: PuzzleSegment[], metrics: PuzzleMetrics) {
-  for (let firstIndex = 0; firstIndex < segments.length; firstIndex += 1) {
-    for (let secondIndex = firstIndex + 1; secondIndex < segments.length; secondIndex += 1) {
-      if (
-        segmentsOverlap(segments[firstIndex].pose, segments[secondIndex].pose, metrics)
-      ) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-function isValidInitialPose(
-  pose: SegmentPose,
-  placed: PuzzleSegment[],
-  metrics: PuzzleMetrics,
-) {
-  if (!isPoseWithinCanvas(pose, metrics)) {
-    return false;
-  }
-
-  return !placed.some((segment) => segmentsOverlap(pose, segment.pose, metrics));
-}
-
-function getLayoutAttempts(segmentCount: number) {
-  return INITIAL_LAYOUT_MAX_ATTEMPTS + segmentCount * 25;
-}
-
-function getLayoutRetries(segmentCount: number) {
-  return INITIAL_LAYOUT_MAX_RETRIES + segmentCount * 6;
-}
-
-function tryCreateRandomLayout(
-  segmentCount: number,
-  colorPalette: string[],
-  metrics: PuzzleMetrics,
-): PuzzleSegment[] | null {
-  const placed: PuzzleSegment[] = [];
-  const halfLength = metrics.length / 2;
-  const maxAttempts = getLayoutAttempts(segmentCount);
-
-  for (let id = 0; id < segmentCount; id += 1) {
-    let pose: SegmentPose | null = null;
-
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const candidate: SegmentPose = {
-        center: {
-          x: randomInRange(
-            halfLength + metrics.layoutMargin + metrics.viewHandleRadius,
-            metrics.canvasWidth - halfLength - metrics.layoutMargin - metrics.viewHandleRadius,
-          ),
-          y: randomInRange(
-            metrics.layoutMinY + metrics.viewHandleRadius + 20,
-            metrics.layoutMaxY - metrics.viewHandleRadius - 20,
-          ),
-        },
-        angle: randomInRange(-Math.PI * 0.42, Math.PI * 0.42),
-      };
-
-      if (isValidInitialPose(candidate, placed, metrics)) {
-        pose = candidate;
-        break;
-      }
-    }
-
-    if (!pose) {
-      return null;
-    }
-
-    placed.push({
-      id,
-      color: colorPalette[id],
-      pose,
-    });
-  }
-
-  return hasAnySegmentOverlap(placed, metrics) ? null : placed;
-}
-
-function createGridFallbackLayout(
+// One fixed, deterministic layout for every puzzle: every segment is oriented
+// at 45° on a centred grid (the "//////" tiling). It is instant to compute,
+// identical each time, and overlap-free by construction — each cell's bounding
+// box is sized so neighbours never touch, so no collision testing is needed.
+function createInitialSegments(
   segmentCount: number,
   colorPalette: string[],
   metrics: PuzzleMetrics,
 ): PuzzleSegment[] {
-  const placed: PuzzleSegment[] = [];
-  const cols = Math.ceil(Math.sqrt(segmentCount * 1.35));
+  const cols = Math.max(1, metrics.layoutCols);
   const rows = Math.ceil(segmentCount / cols);
-  const usableWidth = metrics.canvasWidth - metrics.layoutMargin * 2;
-  const usableHeight = metrics.layoutMaxY - metrics.layoutMinY;
-  const cellWidth = usableWidth / cols;
-  const cellHeight = usableHeight / rows;
-  const angleOptions = [0, 0.22, -0.22, 0.38, -0.38, 0.55, -0.55];
-
-  for (let id = 0; id < segmentCount; id += 1) {
-    const col = id % cols;
-    const row = Math.floor(id / cols);
-    const baseCenter = {
-      x: metrics.layoutMargin + cellWidth * (col + 0.5),
-      y: metrics.layoutMinY + cellHeight * (row + 0.5),
-    };
-
-    let pose: SegmentPose | null = null;
-
-    for (const angle of angleOptions) {
-      const candidate = { center: baseCenter, angle };
-      if (isValidInitialPose(candidate, placed, metrics)) {
-        pose = candidate;
-        break;
-      }
-    }
-
-    if (!pose) {
-      for (let jitterAttempt = 0; jitterAttempt < 24; jitterAttempt += 1) {
-        const candidate = {
-          center: {
-            x: baseCenter.x + randomInRange(-cellWidth * 0.22, cellWidth * 0.22),
-            y: baseCenter.y + randomInRange(-cellHeight * 0.22, cellHeight * 0.22),
-          },
-          angle: randomInRange(-0.55, 0.55),
-        };
-
-        if (isValidInitialPose(candidate, placed, metrics)) {
-          pose = candidate;
-          break;
-        }
-      }
-    }
-
-    if (!pose) {
-      break;
-    }
-
-    placed.push({
-      id,
-      color: colorPalette[id],
-      pose,
-    });
-  }
-
-  return placed;
-}
-
-function getLayoutPitch(metrics: PuzzleMetrics) {
-  return metrics.length + metrics.layoutHorizontalGap;
-}
-
-function buildCompactLayoutWithCols(
-  segmentCount: number,
-  colorPalette: string[],
-  metrics: PuzzleMetrics,
-  cols: number,
-): PuzzleSegment[] {
-  const pitch = getLayoutPitch(metrics);
-  const segmentHeight = metrics.viewHandleRadius * 2 + metrics.bodyWidth + 4;
-  const rowPitch = segmentHeight + metrics.layoutVerticalGap;
-  const rows = Math.ceil(segmentCount / cols);
-  const usableWidth = metrics.canvasWidth - metrics.layoutMargin * 2;
-  const usableHeight = metrics.layoutMaxY - metrics.layoutMinY;
-  const gridHeight = rows * rowPitch - metrics.layoutVerticalGap;
-  const startY = metrics.layoutMinY + (usableHeight - gridHeight) / 2 + segmentHeight / 2;
+  const boxSide = metrics.length / Math.SQRT2 + metrics.viewHandleRadius * 2;
+  const pitch = boxSide + metrics.minSegmentSeparation;
+  const playWidth = metrics.canvasWidth - metrics.layoutMargin * 2;
+  const playHeight = metrics.layoutMaxY - metrics.layoutMinY;
+  const gridHeight = (rows - 1) * pitch + boxSide;
+  const startY = metrics.layoutMinY + (playHeight - gridHeight) / 2 + boxSide / 2;
   const placed: PuzzleSegment[] = [];
 
   for (let id = 0; id < segmentCount; id += 1) {
     const row = Math.floor(id / cols);
     const col = id % cols;
     const colsInRow = Math.min(cols, segmentCount - row * cols);
-    const rowWidth = (colsInRow - 1) * pitch + metrics.length;
-    const rowStartX = metrics.layoutMargin + (usableWidth - rowWidth) / 2 + metrics.length / 2;
+    const rowWidth = (colsInRow - 1) * pitch + boxSide;
+    const rowStartX = metrics.layoutMargin + (playWidth - rowWidth) / 2 + boxSide / 2;
 
     placed.push({
       id,
       color: colorPalette[id],
       pose: {
-        center: {
-          x: rowStartX + col * pitch,
-          y: startY + row * rowPitch,
-        },
-        angle: 0,
+        center: { x: rowStartX + col * pitch, y: startY + row * pitch },
+        // 45° up-right slash, matching the "//////" tiling.
+        angle: -Math.PI / 4,
       },
     });
   }
 
   return placed;
-}
-
-function createCompactLayout(
-  segmentCount: number,
-  colorPalette: string[],
-  metrics: PuzzleMetrics,
-): PuzzleSegment[] {
-  for (let cols = metrics.layoutCols; cols >= 3; cols -= 1) {
-    const layout = buildCompactLayoutWithCols(segmentCount, colorPalette, metrics, cols);
-    if (layout.length === segmentCount && !hasAnySegmentOverlap(layout, metrics)) {
-      return layout;
-    }
-  }
-
-  return buildCompactLayoutWithCols(
-    segmentCount,
-    colorPalette,
-    metrics,
-    Math.min(3, segmentCount),
-  );
-}
-
-function createSpacedRowLayout(
-  segmentCount: number,
-  colorPalette: string[],
-  metrics: PuzzleMetrics,
-): PuzzleSegment[] {
-  const horizontalGap = metrics.minSegmentSeparation + metrics.viewHandleRadius * 2 + 12;
-  const pitch = metrics.length + horizontalGap;
-  const usableWidth = metrics.canvasWidth - metrics.layoutMargin * 2;
-  const minRowGap = metrics.viewHandleRadius * 2 + metrics.minSegmentSeparation + 20;
-  const availableHeight =
-    metrics.layoutMaxY - metrics.layoutMinY - metrics.viewHandleRadius * 2 - 30;
-
-  let segmentsPerRow = Math.max(1, Math.floor(usableWidth / pitch));
-  let rows = Math.ceil(segmentCount / segmentsPerRow);
-
-  while (rows > 1 && (rows - 1) * minRowGap > availableHeight) {
-    segmentsPerRow += 1;
-    rows = Math.ceil(segmentCount / segmentsPerRow);
-    if (segmentsPerRow >= segmentCount) {
-      break;
-    }
-  }
-
-  const rowGap =
-    rows <= 1 ? 0 : Math.max(minRowGap, availableHeight / Math.max(rows - 1, 1));
-  const placed: PuzzleSegment[] = [];
-
-  for (let id = 0; id < segmentCount; id += 1) {
-    const row = Math.floor(id / segmentsPerRow);
-    const col = id % segmentsPerRow;
-    const rowCount = Math.min(segmentsPerRow, segmentCount - row * segmentsPerRow);
-    const rowWidth = rowCount * pitch - horizontalGap;
-    const rowStartX =
-      metrics.layoutMargin + (usableWidth - rowWidth) / 2 + metrics.length / 2;
-
-    placed.push({
-      id,
-      color: colorPalette[id],
-      pose: {
-        center: {
-          x: rowStartX + col * pitch,
-          y: metrics.layoutMinY + metrics.viewHandleRadius + 24 + row * rowGap,
-        },
-        angle: 0,
-      },
-    });
-  }
-
-  return placed;
-}
-
-function createInitialSegments(
-  segmentCount: number,
-  colorPalette: string[],
-  metrics: PuzzleMetrics,
-): PuzzleSegment[] {
-  if (segmentCount >= 6) {
-    const compactLayout = createCompactLayout(segmentCount, colorPalette, metrics);
-    if (
-      compactLayout.length === segmentCount &&
-      !hasAnySegmentOverlap(compactLayout, metrics)
-    ) {
-      return compactLayout;
-    }
-  }
-
-  const maxRetries = getLayoutRetries(segmentCount);
-
-  for (let retry = 0; retry < maxRetries; retry += 1) {
-    const layout = tryCreateRandomLayout(segmentCount, colorPalette, metrics);
-    if (layout) {
-      return layout;
-    }
-  }
-
-  const gridLayout = createGridFallbackLayout(segmentCount, colorPalette, metrics);
-  if (gridLayout.length === segmentCount && !hasAnySegmentOverlap(gridLayout, metrics)) {
-    return gridLayout;
-  }
-
-  return createCompactLayout(segmentCount, colorPalette, metrics);
 }
 
 function getSvgPoint(svg: SVGSVGElement, clientX: number, clientY: number): Point {
@@ -1323,6 +843,14 @@ function normalizeConnectedGeometry(
         continue;
       }
 
+      // A segment whose two handles resolve to the same node is a self-loop the
+      // length constraint can never satisfy. Skip it so we don't repeatedly
+      // teleport the shared node by +length each iteration (which would fling
+      // the whole assembly off-canvas).
+      if (startNode === endNode) {
+        continue;
+      }
+
       const distance = getDistance(startNode.point, endNode.point);
       if (distance === 0) {
         endNode.point = {
@@ -1377,6 +905,26 @@ function wouldCreateDuplicateSegmentBridge(
   candidate: SnapCandidate,
 ) {
   if (candidate.dragged.segmentId === candidate.target.segmentId) {
+    return true;
+  }
+
+  // Forbid snapping a handle into a node that already holds the dragged
+  // segment's opposite handle: that would loop one segment back onto itself
+  // (both handles in one node), which is geometrically degenerate and makes
+  // the length-constraint solver fling the assembly off-canvas.
+  const oppositeHandle = getOppositeHandle(candidate.dragged.handle);
+  const targetNodeMembers = getConnectedNodeMembers(
+    connections,
+    candidate.target.segmentId,
+    candidate.target.handle,
+  );
+  if (
+    targetNodeMembers.some(
+      (member) =>
+        member.segmentId === candidate.dragged.segmentId &&
+        member.handle === oppositeHandle,
+    )
+  ) {
     return true;
   }
 
@@ -1802,6 +1350,7 @@ export default function App() {
     initialGame.disconnectionEffects,
   );
   const [dragState, setDragState] = useState(initialGame.dragState);
+  const [checkResult, setCheckResult] = useState<{ dots: number; max: number } | null>(null);
   // Physics is the shipping mode; the classic path is retained behind this flag
   // so it can be revived by flipping the value.
   const dragMode: DragMode = "physics";
@@ -1837,6 +1386,7 @@ export default function App() {
     setCapState(nextGame.capState);
     setDisconnectionEffects(nextGame.disconnectionEffects);
     setDragState(nextGame.dragState);
+    setCheckResult(null);
   }
 
   useEffect(
@@ -2882,33 +2432,66 @@ export default function App() {
 
         <div
           ref={rightChromeRef}
-          className="pointer-events-none absolute right-10 top-9 z-10 flex items-center gap-5 text-[13px] font-light text-zinc-400"
+          className="pointer-events-none absolute right-10 top-9 z-10 text-[13px] font-light text-zinc-400"
         >
-          <label className="pointer-events-auto flex items-center gap-2">
-            <span className="tracking-wide">Pieces</span>
-            <select
-              value={segmentCount}
-              onChange={(event) => restartGame(Number(event.target.value))}
-              className="cursor-pointer rounded-md border border-zinc-200 bg-white px-2 py-1 text-zinc-700 outline-none transition hover:border-zinc-300 focus:border-zinc-400"
-            >
-              {Array.from(
-                { length: MAX_SEGMENT_COUNT - MIN_SEGMENT_COUNT + 1 },
-                (_, index) => MIN_SEGMENT_COUNT + index,
-              ).map((count) => (
-                <option key={count} value={count}>
-                  {count}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="flex items-center gap-5">
+            <label className="pointer-events-auto flex items-center gap-2">
+              <span className="tracking-wide">Pieces</span>
+              <select
+                value={segmentCount}
+                onChange={(event) => restartGame(Number(event.target.value))}
+                className="cursor-pointer rounded-md border border-zinc-200 bg-white px-2 py-1 text-zinc-700 outline-none transition hover:border-zinc-300 focus:border-zinc-400"
+              >
+                {Array.from(
+                  { length: MAX_SEGMENT_COUNT - MIN_SEGMENT_COUNT + 1 },
+                  (_, index) => MIN_SEGMENT_COUNT + index,
+                ).map((count) => (
+                  <option key={count} value={count}>
+                    {count}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <button
-            type="button"
-            onClick={() => restartGame(segmentCount)}
-            className="pointer-events-auto tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
-          >
-            Restart
-          </button>
+            <button
+              type="button"
+              onClick={() => restartGame(segmentCount)}
+              className="pointer-events-auto tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
+            >
+              Restart
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                const dots = capState.fallenCaps.filter((cap) => cap.status !== "returning").length;
+                setCheckResult({ dots, max: getMaxDots(segmentCount) });
+              }}
+              className="pointer-events-auto tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
+            >
+              Check
+            </button>
+          </div>
+
+          {checkResult && (
+            <div className="pointer-events-auto mt-3 flex items-center justify-end gap-3">
+              {checkResult.dots >= checkResult.max ? (
+                <span className="font-medium text-emerald-600">Solved! You cracked it 🎉</span>
+              ) : (
+                <span className="text-zinc-700">
+                  Not solved yet — {checkResult.max - checkResult.dots} more{" "}
+                  {checkResult.max - checkResult.dots === 1 ? "dot" : "dots"} to go.
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setCheckResult(null)}
+                className="text-zinc-400 transition hover:text-zinc-900"
+              >
+                ×
+              </button>
+            </div>
+          )}
         </div>
     </main>
   );
