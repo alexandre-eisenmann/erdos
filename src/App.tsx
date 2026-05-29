@@ -5,6 +5,7 @@ import {
   grabOffsetFor,
   PHYSICS,
   poseFromBody,
+  settleConnectedSegments,
   stepPhysics,
   type PhysicsRuntime,
 } from "./dragPhysics";
@@ -16,7 +17,11 @@ const CAP_FALL_DURATION_MS = 520;
 const CAP_RETURN_DURATION_MS = 480;
 const CAP_RESTACK_SPEED = 0.2;
 const CANVAS_WIDTH = 1200;
-const CANVAS_MIN_HEIGHT = 720;
+const CANVAS_MIN_HEIGHT = 1200;
+// Chrome height (screen px) reserved at the top of the SVG for title + hints.
+const REFERENCE_CHROME_TOP_PX = 188;
+// Every puzzle uses the rod length that fits this many pieces in the reference band.
+const PUZZLE_REFERENCE_SEGMENT_COUNT = 5;
 
 type CanvasSize = {
   width: number;
@@ -51,6 +56,10 @@ function getDefaultLayoutChrome(): LayoutChrome {
 const MIN_SEGMENT_COUNT = 3;
 const MAX_SEGMENT_COUNT = 57;
 const DEFAULT_SEGMENT_COUNT = 5;
+const SEGMENT_COUNT_OPTIONS = Array.from(
+  { length: MAX_SEGMENT_COUNT - MIN_SEGMENT_COUNT + 1 },
+  (_, index) => MIN_SEGMENT_COUNT + index,
+);
 
 // U_TABLE[n] = u(n) = the number of segments for index n.
 const U_TABLE = [0, 0, 1, 3, 5, 7, 9, 12, 14, 18, 20, 23, 27, 30, 33, 37, 41, 43, 46, 50, 54, 57];
@@ -93,6 +102,9 @@ type PuzzleMetrics = {
   pileDotRadius: number;
   collisionRadius: number;
   minSegmentSeparation: number;
+  layoutGridSeparation: number;
+  layoutPlayTopY: number;
+  layoutPlayHeight: number;
   layoutMinY: number;
   layoutMaxY: number;
   layoutMargin: number;
@@ -180,35 +192,165 @@ function lerp(start: number, end: number, progress: number) {
   return start + (end - start) * progress;
 }
 
-// Largest 45° segment length, and the column count, that packs `segmentCount`
-// diagonal segments into the play area. A 45° segment occupies a square
-// bounding box of side L/√2 + 2·viewHandleRadius; spacing grid cells one box
-// (plus a separation gap) apart keeps neighbouring boxes from touching, so the
-// segments inside them can never overlap — no collision testing required. We
-// scan every column count and keep the one yielding the largest fitting
-// segment (which naturally balances the grid to the play area's aspect ratio).
-function chooseDiagonalGrid(
+function getReferenceLayoutBand(
+  layoutMargin: number,
+  viewHandleRadius: number,
+  pileDotRadius: number,
+) {
+  const referenceLayoutMinY =
+    Math.round((REFERENCE_CHROME_TOP_PX / CANVAS_MIN_HEIGHT) * CANVAS_MIN_HEIGHT) +
+    Math.round(layoutMargin * 0.35);
+  const refBottomInset = Math.max(28, Math.round(CANVAS_MIN_HEIGHT * 0.035));
+  const layoutBottomClearance = viewHandleRadius + pileDotRadius;
+  const referenceLayoutMaxY =
+    CANVAS_MIN_HEIGHT - refBottomInset - layoutBottomClearance - pileDotRadius;
+  return {
+    playWidth: CANVAS_WIDTH - layoutMargin * 2,
+    playHeight: referenceLayoutMaxY - referenceLayoutMinY,
+    referenceLayoutMinY,
+    referenceLayoutMaxY,
+  };
+}
+
+function maxRodLengthForCols(
   segmentCount: number,
+  cols: number,
   playWidth: number,
   playHeight: number,
   viewHandleRadius: number,
   separation: number,
   maxLength: number,
 ) {
-  let best = { length: 0, cols: 1 };
+  const rows = Math.ceil(segmentCount / cols);
+  const boxByWidth = (playWidth - (cols - 1) * separation) / cols;
+  const boxByHeight = (playHeight - (rows - 1) * separation) / rows;
+  const box = Math.min(boxByWidth, boxByHeight);
+  const length = Math.SQRT2 * (box - 2 * viewHandleRadius);
+  return Math.min(maxLength, Math.max(0, length));
+}
+
+function gridFitsFixedLength(
+  segmentCount: number,
+  cols: number,
+  length: number,
+  playWidth: number,
+  playHeight: number,
+  viewHandleRadius: number,
+  separation: number,
+) {
+  const boxSide = length / Math.SQRT2 + viewHandleRadius * 2;
+  const pitch = boxSide + separation;
+  const rows = Math.ceil(segmentCount / cols);
+  const gridWidth = (cols - 1) * pitch + boxSide;
+  const gridHeight = (rows - 1) * pitch + boxSide;
+  return gridWidth <= playWidth + 0.5 && gridHeight <= playHeight + 0.5;
+}
+
+// Rod length is always the n=5 reference. Column count uses the fewest columns
+// (most rows) that fit that length; if none fit, keep the reference length and
+// use the fewest columns among layouts closest to it.
+function chooseInitialLayout(
+  segmentCount: number,
+  playWidth: number,
+  playHeight: number,
+  viewHandleRadius: number,
+  separation: number,
+  referenceRodLength: number,
+  maxLength: number,
+) {
+  if (
+    segmentCount === PUZZLE_REFERENCE_SEGMENT_COUNT &&
+    gridFitsFixedLength(
+      segmentCount,
+      segmentCount,
+      referenceRodLength,
+      playWidth,
+      playHeight,
+      viewHandleRadius,
+      separation,
+    )
+  ) {
+    return { length: referenceRodLength, cols: segmentCount };
+  }
 
   for (let cols = 1; cols <= segmentCount; cols += 1) {
-    const rows = Math.ceil(segmentCount / cols);
-    const boxByWidth = (playWidth - (cols - 1) * separation) / cols;
-    const boxByHeight = (playHeight - (rows - 1) * separation) / rows;
-    const box = Math.min(boxByWidth, boxByHeight);
-    const length = Math.SQRT2 * (box - 2 * viewHandleRadius);
-    if (length > best.length) {
+    if (
+      gridFitsFixedLength(
+        segmentCount,
+        cols,
+        referenceRodLength,
+        playWidth,
+        playHeight,
+        viewHandleRadius,
+        separation,
+      )
+    ) {
+      return { length: referenceRodLength, cols };
+    }
+  }
+
+  let best = { length: 0, cols: segmentCount };
+  for (let cols = 1; cols <= segmentCount; cols += 1) {
+    const maxForCols = maxRodLengthForCols(
+      segmentCount,
+      cols,
+      playWidth,
+      playHeight,
+      viewHandleRadius,
+      separation,
+      maxLength,
+    );
+    const length = Math.min(referenceRodLength, maxForCols);
+    const clearlyLonger = length > best.length + 0.5;
+    const tiePreferFewerCols =
+      best.length > 0 && length >= best.length - 0.5 && cols < best.cols;
+    if (clearlyLonger || tiePreferFewerCols || best.length === 0) {
       best = { length, cols };
     }
   }
 
-  return { length: Math.min(maxLength, Math.max(0, best.length)), cols: best.cols };
+  return best;
+}
+
+function getReferenceRodLength(
+  layoutMargin: number,
+  viewHandleRadius: number,
+  pileDotRadius: number,
+  separation: number,
+  maxLength: number,
+) {
+  const band = getReferenceLayoutBand(layoutMargin, viewHandleRadius, pileDotRadius);
+  // The canonical rod size: one row of five pieces (the default puzzle).
+  const singleRowLength = maxRodLengthForCols(
+    PUZZLE_REFERENCE_SEGMENT_COUNT,
+    PUZZLE_REFERENCE_SEGMENT_COUNT,
+    band.playWidth,
+    band.playHeight,
+    viewHandleRadius,
+    separation,
+    maxLength,
+  );
+  if (singleRowLength > 0) {
+    return singleRowLength;
+  }
+
+  let bestLength = 0;
+  for (let cols = 1; cols <= PUZZLE_REFERENCE_SEGMENT_COUNT; cols += 1) {
+    const length = maxRodLengthForCols(
+      PUZZLE_REFERENCE_SEGMENT_COUNT,
+      cols,
+      band.playWidth,
+      band.playHeight,
+      viewHandleRadius,
+      separation,
+      maxLength,
+    );
+    if (length > bestLength) {
+      bestLength = length;
+    }
+  }
+
+  return bestLength;
 }
 
 function getPuzzleMetrics(
@@ -227,7 +369,9 @@ function getPuzzleMetrics(
   const snapRadiusBase = Math.round(lerp(54, 32, t));
   const capStackStep = handleRadius * 2 + 6;
   const layoutMargin = Math.round(lerp(48, 32, t));
-  const pileDotRadius = Math.max(10, Math.min(18, Math.round(canvas.height * 0.022)));
+  // A pile dot is the size of the whole handle circle (the outer ring); the
+  // colorful kernel is what drops into it.
+  const pileDotRadius = viewHandleRadius;
   const pileCounterFontSize = Math.max(
     56,
     Math.min(104, Math.round(canvas.height * 0.11)),
@@ -237,27 +381,65 @@ function getPuzzleMetrics(
   const pileCounterY = canvas.height - bottomInset - pileCounterFontSize * 0.32;
   const pileBaseY =
     pileCounterY - pileCounterFontSize * 0.48 - pileToCounterGap - pileDotRadius;
-  const pileStep = pileDotRadius * 2 + 6;
-  const capStackReserve = pileStep * 5;
+  // Keep the initial grid just above the pile row; fallen caps stack upward from
+  // pileBaseY during play. (A multi-row cap-stack reserve left the play area too
+  // short, which forced wide 9×2 grids and short segments at higher counts.)
+  const layoutBottomClearance = viewHandleRadius + pileDotRadius;
   const topInsetSvg = Math.round(
     (chrome.topPx / Math.max(chrome.containerHeightPx, 1)) * canvas.height,
   );
-  const layoutMinY = topInsetSvg + Math.round(layoutMargin * 0.35);
-  const layoutMaxY = pileBaseY - capStackReserve - viewHandleRadius;
-  const playWidth = canvas.width - layoutMargin * 2;
-  const playHeight = layoutMaxY - layoutMinY;
+  const referenceLayoutMinY =
+    Math.round(
+      (REFERENCE_CHROME_TOP_PX / Math.max(chrome.containerHeightPx, 1)) * canvas.height,
+    ) + Math.round(layoutMargin * 0.35);
+  const layoutMinY = Math.max(topInsetSvg + Math.round(layoutMargin * 0.35), referenceLayoutMinY);
+  // Puzzle band runs down to just above the floor pile; the score numeral overlays
+  // the bottom edge (HTML/SVG text), so we do not reserve the full counter block.
+  const layoutMaxY =
+    canvas.height - bottomInset - layoutBottomClearance - pileDotRadius;
   const minSegmentSeparation = Math.round(lerp(28, 8, t));
   const bodyHalfWidth = (bodyWidth + 6) / 2;
   const collisionRadius = Math.max(bodyHalfWidth, viewHandleRadius) + 8;
-  const layout = chooseDiagonalGrid(
+  // Segment length & column count are sized against a FIXED reference play area
+  // (the design canvas), not the live one. That keeps them a pure function of
+  // piece count, so resizing the window only rescales the SVG viewBox — it never
+  // reflows the puzzle, which would otherwise resize every rod and tear joints
+  // apart (their poses were built for the previous length). Canvas width is
+  // already fixed (CANVAS_WIDTH); only the height needed pinning.
+  const tRef =
+    (PUZZLE_REFERENCE_SEGMENT_COUNT - MIN_SEGMENT_COUNT) /
+    (MAX_SEGMENT_COUNT - MIN_SEGMENT_COUNT);
+  const refHandleRadius = Math.round(lerp(10, 7, tRef));
+  const refViewHandleRadius = refHandleRadius + 7;
+  const refLayoutMargin = Math.round(lerp(48, 32, tRef));
+  const refLayoutGridSeparation = Math.round(lerp(12, 4, tRef));
+  const referenceBand = getReferenceLayoutBand(
+    refLayoutMargin,
+    refViewHandleRadius,
+    refViewHandleRadius,
+  );
+  const referenceRodLength = getReferenceRodLength(
+    refLayoutMargin,
+    refViewHandleRadius,
+    refViewHandleRadius,
+    refLayoutGridSeparation,
+    360,
+  );
+  const layout = chooseInitialLayout(
     segmentCount,
-    playWidth,
-    playHeight,
-    viewHandleRadius,
-    minSegmentSeparation,
-    280,
+    referenceBand.playWidth,
+    referenceBand.playHeight,
+    refViewHandleRadius,
+    refLayoutGridSeparation,
+    referenceRodLength,
+    360,
   );
   const length = layout.length;
+  const layoutPlayTopY = Math.max(
+    layoutMinY + Math.round(viewHandleRadius * 0.5),
+    referenceBand.referenceLayoutMinY + Math.round(refViewHandleRadius * 0.5),
+  );
+  const layoutPlayHeight = referenceBand.playHeight;
   // Segments shrink to fit large counts, so keep the snap radius from dwarfing a
   // short segment (which would make every release snap and feel uncontrollable).
   const snapRadius = Math.min(snapRadiusBase, Math.round(length * 0.6));
@@ -278,6 +460,9 @@ function getPuzzleMetrics(
     pileDotRadius,
     collisionRadius,
     minSegmentSeparation,
+    layoutGridSeparation: refLayoutGridSeparation,
+    layoutPlayTopY,
+    layoutPlayHeight,
     layoutMinY,
     layoutMaxY,
     layoutMargin,
@@ -324,11 +509,11 @@ function createInitialSegments(
   const cols = Math.max(1, metrics.layoutCols);
   const rows = Math.ceil(segmentCount / cols);
   const boxSide = metrics.length / Math.SQRT2 + metrics.viewHandleRadius * 2;
-  const pitch = boxSide + metrics.minSegmentSeparation;
+  const pitch = boxSide + metrics.layoutGridSeparation;
   const playWidth = metrics.canvasWidth - metrics.layoutMargin * 2;
-  const playHeight = metrics.layoutMaxY - metrics.layoutMinY;
+  const playHeight = metrics.layoutPlayHeight;
   const gridHeight = (rows - 1) * pitch + boxSide;
-  const startY = metrics.layoutMinY + (playHeight - gridHeight) / 2 + boxSide / 2;
+  const startY = metrics.layoutPlayTopY + (playHeight - gridHeight) / 2 + boxSide / 2;
   const placed: PuzzleSegment[] = [];
 
   for (let id = 0; id < segmentCount; id += 1) {
@@ -815,6 +1000,22 @@ function getConstraintGraph(
   };
 }
 
+// Settles a released drag into clean geometry using the rigid-body joint
+// solver: rods keep their exact length while their joints are pulled tight, so
+// connected handles meet and a segment can never be drawn shorter than its rod
+// (the mid-body-kernel glitch). Returns segments with updated poses.
+function settleGeometry(
+  segments: PuzzleSegment[],
+  connections: Connection[],
+  metrics: PuzzleMetrics,
+): PuzzleSegment[] {
+  const poseById = settleConnectedSegments(segments, connections, metrics.length);
+  return segments.map((segment) => {
+    const pose = poseById.get(segment.id);
+    return pose ? { ...segment, pose } : segment;
+  });
+}
+
 function normalizeConnectedGeometry(
   segments: PuzzleSegment[],
   connections: Connection[],
@@ -1214,110 +1415,118 @@ function getConnectionFromSnapCandidate(candidate: SnapCandidate): Connection {
   };
 }
 
-function getCapKeysToRestore(
+// The set of handle keys whose colored kernel is hidden (i.e. a released dot):
+// every joint with 2+ members keeps only its earliest-joined handle visible
+// (the owner) and hides the rest. The released-dot count is exactly this set's
+// size — equivalently (connected handles) − (number of joints) — so it is
+// always correct, including after detaching a segment joined at both ends.
+function computeHiddenCapKeys(
   connections: Connection[],
-  hiddenCapKeys: string[],
   joinOrder: Map<string, number>,
-) {
-  const connectionHandles = connections.flatMap((connection) => [
-    connection.from,
-    connection.to,
-  ]);
+): Set<string> {
+  const hidden = new Set<string>();
   const visited = new Set<string>();
-  const keysToRestore: string[] = [];
 
-  for (const handle of connectionHandles) {
-    const key = getHandleKey(handle.segmentId, handle.handle);
-    if (visited.has(key)) {
-      continue;
-    }
+  for (const connection of connections) {
+    for (const handle of [connection.from, connection.to]) {
+      const key = getHandleKey(handle.segmentId, handle.handle);
+      if (visited.has(key)) {
+        continue;
+      }
 
-    const members = getConnectedNodeMembers(connections, handle.segmentId, handle.handle);
-    for (const member of members) {
-      visited.add(getHandleKey(member.segmentId, member.handle));
-    }
+      const members = getConnectedNodeMembers(connections, handle.segmentId, handle.handle);
+      for (const member of members) {
+        visited.add(getHandleKey(member.segmentId, member.handle));
+      }
+      if (members.length < 2) {
+        continue;
+      }
 
-    if (members.length < 2) {
-      continue;
-    }
+      let ownerKey: string | null = null;
+      let ownerOrder = Number.POSITIVE_INFINITY;
+      for (const member of members) {
+        const memberKey = getHandleKey(member.segmentId, member.handle);
+        const order = joinOrder.get(memberKey) ?? Number.POSITIVE_INFINITY;
+        if (order < ownerOrder) {
+          ownerOrder = order;
+          ownerKey = memberKey;
+        }
+      }
 
-    const hasVisibleCap = members.some(
-      (member) => !hiddenCapKeys.includes(getHandleKey(member.segmentId, member.handle)),
-    );
-    if (hasVisibleCap) {
-      continue;
-    }
-
-    const restoreHandle = [...members].sort((first, second) => {
-      const firstOrder =
-        joinOrder.get(getHandleKey(first.segmentId, first.handle)) ??
-        Number.POSITIVE_INFINITY;
-      const secondOrder =
-        joinOrder.get(getHandleKey(second.segmentId, second.handle)) ??
-        Number.POSITIVE_INFINITY;
-      return firstOrder - secondOrder;
-    })[0];
-
-    if (restoreHandle) {
-      keysToRestore.push(getHandleKey(restoreHandle.segmentId, restoreHandle.handle));
+      for (const member of members) {
+        const memberKey = getHandleKey(member.segmentId, member.handle);
+        if (memberKey !== ownerKey) {
+          hidden.add(memberKey);
+        }
+      }
     }
   }
 
-  return keysToRestore;
+  return hidden;
 }
 
-function reconcileCapState(
+// Single source of truth for the dot pile: reconcile the fallen caps against the
+// hidden set derived from the current connections. Newly hidden kernels fall
+// into the pile; kernels no longer hidden animate back to their handle. Called
+// after every connect/disconnect, so the count can never drift.
+function reconcileCaps(
   segments: PuzzleSegment[],
   connections: Connection[],
-  capState: CapState,
   joinOrder: Map<string, number>,
   metrics: PuzzleMetrics,
+  capState: CapState,
 ): CapState {
-  const keysToRestore = getCapKeysToRestore(
-    connections,
-    capState.hiddenCapKeys,
-    joinOrder,
-  );
+  const hidden = computeHiddenCapKeys(connections, joinOrder);
+  const now = performance.now();
+  const existingKeys = new Set(capState.fallenCaps.map((cap) => cap.key));
+  let pileCount = capState.fallenCaps.filter((cap) => cap.status !== "returning").length;
 
-  if (keysToRestore.length === 0) {
-    return capState;
+  const fallenCaps: FallenCap[] = capState.fallenCaps.map((cap) => {
+    if (hidden.has(cap.key)) {
+      // Belongs in the pile. If it was animating back, send it down again.
+      if (cap.status === "returning") {
+        return { ...cap, status: "falling", from: cap.current, to: cap.current, startedAt: now };
+      }
+      return cap;
+    }
+
+    // No longer hidden — return it to its handle (unless already doing so).
+    if (cap.status === "returning") {
+      return cap;
+    }
+    const handle = parseHandleKey(cap.key);
+    const returnTo = getHandlePoint(segments, handle, metrics.length) ?? cap.from;
+    return { ...cap, status: "returning", startedAt: now, returnFrom: cap.current, returnTo };
+  });
+
+  for (const key of hidden) {
+    if (existingKeys.has(key)) {
+      continue;
+    }
+    const handle = parseHandleKey(key);
+    const point = getHandlePoint(segments, handle, metrics.length);
+    if (!point) {
+      continue;
+    }
+    fallenCaps.push({
+      key,
+      color: getSegmentColor(segments, handle.segmentId),
+      from: point,
+      to: getPilePosition(pileCount, pileCount + 1, metrics),
+      current: point,
+      status: "falling",
+      startedAt: now,
+    });
+    pileCount += 1;
   }
 
-  const now = performance.now();
-  const capByKey = new Map(capState.fallenCaps.map((cap) => [cap.key, cap]));
-  const keysWithoutFallenCap = keysToRestore.filter((key) => !capByKey.has(key));
-
-  return {
-    hiddenCapKeys: capState.hiddenCapKeys.filter(
-      (key) => !keysWithoutFallenCap.includes(key),
-    ),
-    fallenCaps: capState.fallenCaps.map((cap) => {
-      if (!keysToRestore.includes(cap.key)) {
-        return cap;
-      }
-
-      const handle = parseHandleKey(cap.key);
-      const returnTo = getHandlePoint(segments, handle, metrics.length);
-      if (!returnTo) {
-        return cap;
-      }
-
-      return {
-        ...cap,
-        status: "returning",
-        startedAt: now,
-        returnFrom: cap.current,
-        returnTo,
-      };
-    }),
-  };
+  return { hiddenCapKeys: [...hidden], fallenCaps };
 }
 
 export default function App() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const mainRef = useRef<HTMLElement | null>(null);
-  const leftChromeRef = useRef<HTMLDivElement | null>(null);
-  const rightChromeRef = useRef<HTMLDivElement | null>(null);
+  const chromeRef = useRef<HTMLDivElement | null>(null);
   const disconnectionEffectIdRef = useRef(0);
   // Tracks the order in which each handle first became part of a connection node.
   // The kernel "owner" of a joint is the member with the lowest join-order index
@@ -1406,12 +1615,8 @@ export default function App() {
 
     const measureLayout = () => {
       const mainRect = main.getBoundingClientRect();
-      const leftRect = leftChromeRef.current?.getBoundingClientRect();
-      const rightRect = rightChromeRef.current?.getBoundingClientRect();
-      const chromeBottom = Math.max(
-        leftRect?.bottom ?? mainRect.top,
-        rightRect?.bottom ?? mainRect.top,
-      );
+      const chromeRect = chromeRef.current?.getBoundingClientRect();
+      const chromeBottom = chromeRect?.bottom ?? mainRect.top;
       const topPx = Math.max(0, chromeBottom - mainRect.top + 20);
 
       setCanvasSize((current) => {
@@ -1436,18 +1641,34 @@ export default function App() {
 
     const observer = new ResizeObserver(measureLayout);
     observer.observe(main);
-    if (leftChromeRef.current) {
-      observer.observe(leftChromeRef.current);
-    }
-    if (rightChromeRef.current) {
-      observer.observe(rightChromeRef.current);
+    if (chromeRef.current) {
+      observer.observe(chromeRef.current);
     }
     return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
     setMetrics(getPuzzleMetrics(segmentCount, canvasSize, layoutChrome));
-  }, [canvasSize, segmentCount, layoutChrome]);
+  }, [canvasSize, layoutChrome]);
+
+  useEffect(() => {
+    const nextGame = createInitialGameState(segmentCount, canvasSize, layoutChrome);
+    setMetrics(nextGame.metrics);
+    setSegments(nextGame.segments);
+    setConnections(nextGame.connections);
+    setSnapCandidates(nextGame.snapCandidates);
+    setCapState(nextGame.capState);
+    setDisconnectionEffects(nextGame.disconnectionEffects);
+    setDragState(nextGame.dragState);
+    setCheckResult(null);
+    handleJoinOrderRef.current = new Map();
+    if (physicsFrameRef.current !== null) {
+      window.cancelAnimationFrame(physicsFrameRef.current);
+      physicsFrameRef.current = null;
+    }
+    physicsRef.current = null;
+    gestureRef.current = null;
+  }, [segmentCount]);
 
   useEffect(() => {
     const needsAnimation = capState.fallenCaps.some(
@@ -1528,62 +1749,6 @@ export default function App() {
     };
   }, [capState.fallenCaps, metrics]);
 
-  useEffect(() => {
-    if (dragState || capState.hiddenCapKeys.length === 0) {
-      return;
-    }
-
-    const returningCapKeys = new Set(
-      capState.fallenCaps
-        .filter((cap) => cap.status === "returning")
-        .map((cap) => cap.key),
-    );
-    const disconnectedCapKeys = capState.hiddenCapKeys.filter((key) => {
-      if (returningCapKeys.has(key)) {
-        return false;
-      }
-
-      const handle = parseHandleKey(key);
-      return !isHandleConnected(connections, handle.segmentId, handle.handle);
-    });
-
-    if (disconnectedCapKeys.length === 0) {
-      return;
-    }
-
-    setCapState((currentCapState) => {
-      const now = performance.now();
-      const fallenCapByKey = new Map(
-        currentCapState.fallenCaps.map((cap) => [cap.key, cap]),
-      );
-
-      return {
-        hiddenCapKeys: currentCapState.hiddenCapKeys.filter((key) => {
-          if (!disconnectedCapKeys.includes(key)) {
-            return true;
-          }
-
-          return fallenCapByKey.has(key);
-        }),
-        fallenCaps: currentCapState.fallenCaps.map((cap) => {
-          if (!disconnectedCapKeys.includes(cap.key)) {
-            return cap;
-          }
-
-          const returnTo = getHandlePoint(segments, parseHandleKey(cap.key), metrics.length);
-
-          return {
-            ...cap,
-            status: "returning",
-            startedAt: now,
-            returnFrom: cap.current,
-            returnTo: returnTo ?? cap.from,
-          };
-        }),
-      };
-    });
-  }, [capState.fallenCaps, capState.hiddenCapKeys, connections, dragState, metrics.length, segments]);
-
   function bringDraggedSegmentsToFront(
     grabbedSegmentId: SegmentId,
     componentSegmentIds: SegmentId[],
@@ -1599,101 +1764,6 @@ export default function App() {
     });
   }
 
-  function getCapStateWithHiddenDraggedCaps(
-    currentCapState: CapState,
-    candidates: SnapCandidate[],
-  ): CapState {
-    const hiddenCapKeys = [
-      ...currentCapState.hiddenCapKeys,
-      ...candidates
-        .map((candidate) =>
-          getHandleKey(candidate.dragged.segmentId, candidate.dragged.handle),
-        )
-        .filter((key) => !currentCapState.hiddenCapKeys.includes(key)),
-    ];
-    const capsByKey = new Map(
-      currentCapState.fallenCaps.map((cap) => [cap.key, cap]),
-    );
-    const now = performance.now();
-
-    for (const candidate of candidates) {
-      const key = getHandleKey(candidate.dragged.segmentId, candidate.dragged.handle);
-      if (capsByKey.has(key)) {
-        continue;
-      }
-
-      const color = getSegmentColor(segments, candidate.dragged.segmentId);
-      const pileIndex = [...capsByKey.values()].filter(
-        (cap) => cap.status !== "returning",
-      ).length;
-      const slot = getPilePosition(pileIndex, pileIndex + 1, metrics);
-
-      capsByKey.set(key, {
-        key,
-        color,
-        from: candidate.dragged.point,
-        to: slot,
-        current: candidate.dragged.point,
-        status: "falling",
-        startedAt: now,
-      });
-    }
-
-    return {
-      hiddenCapKeys,
-      fallenCaps: [...capsByKey.values()],
-    };
-  }
-
-  function restoreReleasedCaps(segmentId: SegmentId) {
-    const segmentCapKeys = (["start", "end"] as const).map((handle) =>
-      getHandleKey(segmentId, handle),
-    );
-
-    setCapState((currentCapState) =>
-      reconcileCapState(
-        segments,
-        connections,
-        {
-          ...currentCapState,
-          hiddenCapKeys: currentCapState.hiddenCapKeys.filter((key) => {
-            if (!segmentCapKeys.includes(key)) {
-              return true;
-            }
-
-            const handle = parseHandleKey(key);
-            if (isHandleConnected(connections, handle.segmentId, handle.handle)) {
-              return true;
-            }
-
-            return currentCapState.fallenCaps.some((cap) => cap.key === key);
-          }),
-          fallenCaps: currentCapState.fallenCaps.map((cap) => {
-            if (!segmentCapKeys.includes(cap.key)) {
-              return cap;
-            }
-
-            const handle = parseHandleKey(cap.key);
-            if (isHandleConnected(connections, handle.segmentId, handle.handle)) {
-              return cap;
-            }
-
-            const returnTo = getHandlePoint(segments, handle, metrics.length);
-
-            return {
-              ...cap,
-              status: "returning",
-              startedAt: performance.now(),
-              returnFrom: cap.current,
-              returnTo: returnTo ?? cap.from,
-            };
-          }),
-        },
-        handleJoinOrderRef.current,
-        metrics,
-      ),
-    );
-  }
 
   function disconnectSegment(segmentId: SegmentId) {
     const disconnectedConnections = connections.filter(
@@ -1738,12 +1808,12 @@ export default function App() {
     );
     setConnections(nextConnections);
     setCapState((currentCapState) =>
-      reconcileCapState(
+      reconcileCaps(
         segments,
         nextConnections,
-        currentCapState,
         handleJoinOrderRef.current,
         metrics,
+        currentCapState,
       ),
     );
   }
@@ -1800,12 +1870,12 @@ export default function App() {
     } else {
       setConnections(nextSnapConnections);
       setCapState((currentCapState) =>
-        reconcileCapState(
+        reconcileCaps(
           segments,
           nextSnapConnections,
-          currentCapState,
           handleJoinOrderRef.current,
           metrics,
+          currentCapState,
         ),
       );
     }
@@ -1903,16 +1973,18 @@ export default function App() {
       );
       setConnections(nextConnections);
       setCapState((currentCapState) =>
-        reconcileCapState(
+        reconcileCaps(
           segments,
           nextConnections,
-          getCapStateWithHiddenDraggedCaps(currentCapState, snapCandidates),
           handleJoinOrderRef.current,
           metrics,
+          currentCapState,
         ),
       );
     } else if (dragState) {
-      restoreReleasedCaps(dragState.segmentId);
+      setCapState((currentCapState) =>
+        reconcileCaps(segments, connections, handleJoinOrderRef.current, metrics, currentCapState),
+      );
     }
 
     setDragState(null);
@@ -2116,12 +2188,10 @@ export default function App() {
           );
 
     if (candidates.length === 0) {
-      // No new connection, but the physics drag (mouse constraint vs. joints)
-      // can leave joined handles slightly apart — a connected handle stranded
-      // away from its node, its rod then drawn longer than the node gap so the
-      // kernel sits mid-body. Re-normalize against the existing connections to
-      // pull every joint back to clean, equal-length geometry.
-      setSegments(normalizeConnectedGeometry(liveSegments, connections, metrics));
+      // No new connection, but the physics drag can leave joined handles
+      // slightly apart. Settle the joints on the rigid bodies to close those
+      // gaps without ever shortening a rod.
+      setSegments(settleGeometry(liveSegments, connections, metrics));
       return;
     }
 
@@ -2140,15 +2210,15 @@ export default function App() {
       ...connections,
       ...candidates.map(getConnectionFromSnapCandidate),
     ];
-    setSegments(normalizeConnectedGeometry(liveSegments, nextConnections, metrics));
+    setSegments(settleGeometry(liveSegments, nextConnections, metrics));
     setConnections(nextConnections);
     setCapState((currentCapState) =>
-      reconcileCapState(
+      reconcileCaps(
         liveSegments,
         nextConnections,
-        getCapStateWithHiddenDraggedCaps(currentCapState, candidates),
         handleJoinOrderRef.current,
         metrics,
+        currentCapState,
       ),
     );
   }
@@ -2422,81 +2492,92 @@ export default function App() {
         </svg>
 
         <div
-          ref={leftChromeRef}
-          className="pointer-events-none absolute left-10 top-9 z-10 select-none"
+          ref={chromeRef}
+          className="pointer-events-none absolute inset-x-10 top-9 z-20 space-y-5 rounded-lg bg-white/95 pb-2 select-none"
         >
-          <h1 className="text-[15px] font-medium uppercase tracking-[0.35em] text-zinc-900">
-            Erdős
-          </h1>
-          <div className="mt-4 space-y-1.5 text-[13px] font-light leading-relaxed text-zinc-400">
-            <p>Connect two handles to release a dot.</p>
-            <p>Quick-tap a piece to disconnect.</p>
-            <p>Drag anywhere to move and reshape.</p>
-          </div>
-        </div>
-
-        <div
-          ref={rightChromeRef}
-          className="pointer-events-none absolute right-10 top-9 z-10 text-[13px] font-light text-zinc-400"
-        >
-          <div className="flex items-center gap-5">
-            <label className="pointer-events-auto flex items-center gap-2">
-              <span className="tracking-wide">Pieces</span>
-              <select
-                value={segmentCount}
-                onChange={(event) => restartGame(Number(event.target.value))}
-                className="cursor-pointer rounded-md border border-zinc-200 bg-white px-2 py-1 text-zinc-700 outline-none transition hover:border-zinc-300 focus:border-zinc-400"
-              >
-                {Array.from(
-                  { length: MAX_SEGMENT_COUNT - MIN_SEGMENT_COUNT + 1 },
-                  (_, index) => MIN_SEGMENT_COUNT + index,
-                ).map((count) => (
-                  <option key={count} value={count}>
-                    {count}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <button
-              type="button"
-              onClick={() => restartGame(segmentCount)}
-              className="pointer-events-auto tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
-            >
-              Restart
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                const dots = capState.fallenCaps.filter((cap) => cap.status !== "returning").length;
-                setCheckResult({ dots, max: getMaxDots(segmentCount) });
-              }}
-              className="pointer-events-auto tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
-            >
-              Check
-            </button>
-          </div>
-
-          {checkResult && (
-            <div className="pointer-events-auto mt-3 flex items-center justify-end gap-3">
-              {checkResult.dots >= checkResult.max ? (
-                <span className="font-medium text-emerald-600">Solved! You cracked it 🎉</span>
-              ) : (
-                <span className="text-zinc-700">
-                  Not solved yet — {checkResult.max - checkResult.dots} more{" "}
-                  {checkResult.max - checkResult.dots === 1 ? "dot" : "dots"} to go.
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => setCheckResult(null)}
-                className="text-zinc-400 transition hover:text-zinc-900"
-              >
-                ×
-              </button>
+          <div className="flex items-start justify-between gap-8">
+            <div className="max-w-md pr-4">
+              <h1 className="text-[15px] font-medium uppercase tracking-[0.35em] text-zinc-900">
+                Erdős
+              </h1>
+              <div className="mt-4 space-y-1.5 text-[13px] font-light leading-relaxed text-zinc-400">
+                <p>Connect two handles to release a dot.</p>
+                <p>Quick-tap a piece to disconnect.</p>
+                <p>Drag anywhere to move and reshape.</p>
+              </div>
             </div>
-          )}
+
+            <div className="shrink-0 px-2 text-[13px] font-light text-zinc-400">
+              <div className="pointer-events-auto flex items-center justify-end gap-5">
+                <button
+                  type="button"
+                  onClick={() => restartGame(segmentCount)}
+                  className="tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
+                >
+                  Restart
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const dots = capState.fallenCaps.filter((cap) => cap.status !== "returning").length;
+                    setCheckResult({ dots, max: getMaxDots(segmentCount) });
+                  }}
+                  className="tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
+                >
+                  Check
+                </button>
+              </div>
+
+              {checkResult && (
+                <div className="pointer-events-auto mt-3 flex items-center justify-end gap-3">
+                  {checkResult.dots >= checkResult.max ? (
+                    <span className="font-medium text-emerald-600">Solved! You cracked it 🎉</span>
+                  ) : (
+                    <span className="text-zinc-700">
+                      Not solved yet — {checkResult.max - checkResult.dots} more{" "}
+                      {checkResult.max - checkResult.dots === 1 ? "dot" : "dots"} to go.
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setCheckResult(null)}
+                    className="text-zinc-400 transition hover:text-zinc-900"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="pointer-events-auto px-2">
+            <span className="mb-2 block text-right tracking-[0.2em] text-[13px] font-light text-zinc-400">
+              Pieces
+            </span>
+            <div className="flex flex-wrap justify-end gap-x-[0.7rem] gap-y-[0.35rem] tabular-nums text-[11px] leading-none tracking-tight">
+              {SEGMENT_COUNT_OPTIONS.map((count) => {
+                const isSelected = count === segmentCount;
+
+                return (
+                  <button
+                    key={count}
+                    type="button"
+                    aria-current={isSelected ? "true" : undefined}
+                    onClick={() => restartGame(count)}
+                    className={[
+                      "min-w-[1.15rem] text-center transition-colors",
+                      isSelected
+                        ? "font-semibold text-zinc-900 underline decoration-zinc-900 underline-offset-[3px]"
+                        : "font-light text-zinc-400 hover:text-zinc-600",
+                    ].join(" ")}
+                  >
+                    {count}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
     </main>
   );

@@ -225,3 +225,39 @@ export function stepPhysics(runtime: PhysicsRuntime): boolean {
   }
   return true;
 }
+
+// Pulls all joints tight on the given rigid bodies using only the positional
+// joint solver. Each body stays a rod of exactly `length`, so settling joints
+// this way can never shorten a segment — unlike a node-based re-solve, which can
+// settle two of a segment's nodes closer than the rod and strand its kernel
+// mid-body. Used to clean up joint slack when a drag is released.
+export function settleConnectedSegments(
+  segments: { id: number; pose: SegmentPose }[],
+  connections: { from: { segmentId: number; handle: HandleId }; to: { segmentId: number; handle: HandleId } }[],
+  length: number,
+  iterations = 200,
+): Map<number, SegmentPose> {
+  const bodyById = new Map(
+    segments.map((segment) => [segment.id, createBody(segment.id, segment.pose, length)]),
+  );
+  const joints = connections.map((connection) => ({
+    a: { segmentId: connection.from.segmentId, handle: connection.from.handle },
+    b: { segmentId: connection.to.segmentId, handle: connection.to.handle },
+  }));
+
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    for (const joint of joints) {
+      const a = bodyById.get(joint.a.segmentId);
+      const b = bodyById.get(joint.b.segmentId);
+      if (a && b) {
+        solveJoint(a, b, joint, length);
+      }
+    }
+  }
+
+  const poseById = new Map<number, SegmentPose>();
+  for (const [id, body] of bodyById) {
+    poseById.set(id, poseFromBody(body));
+  }
+  return poseById;
+}
