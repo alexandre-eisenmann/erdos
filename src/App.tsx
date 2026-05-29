@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getSegmentHandlePoint, Segment, type Point, type SegmentPose } from "./Segment";
 import {
   createBody,
@@ -19,7 +19,7 @@ const CAP_RESTACK_SPEED = 0.2;
 const CANVAS_WIDTH = 1200;
 const CANVAS_MIN_HEIGHT = 1200;
 // Chrome height (screen px) reserved at the top of the SVG for title + hints.
-const REFERENCE_CHROME_TOP_PX = 188;
+const REFERENCE_CHROME_TOP_PX = 360;
 // Every puzzle uses the rod length that fits this many pieces in the reference band.
 const PUZZLE_REFERENCE_SEGMENT_COUNT = 5;
 
@@ -48,13 +48,13 @@ function getDefaultCanvasSize(): CanvasSize {
 
 function getDefaultLayoutChrome(): LayoutChrome {
   if (typeof window === "undefined") {
-    return { topPx: 140, containerHeightPx: CANVAS_MIN_HEIGHT };
+    return { topPx: 360, containerHeightPx: CANVAS_MIN_HEIGHT };
   }
 
-  return { topPx: 140, containerHeightPx: window.innerHeight };
+  return { topPx: 360, containerHeightPx: window.innerHeight };
 }
 const MIN_SEGMENT_COUNT = 3;
-const MAX_SEGMENT_COUNT = 57;
+const MAX_SEGMENT_COUNT = 35;
 const DEFAULT_SEGMENT_COUNT = 5;
 const SEGMENT_COUNT_OPTIONS = Array.from(
   { length: MAX_SEGMENT_COUNT - MIN_SEGMENT_COUNT + 1 },
@@ -392,7 +392,10 @@ function getPuzzleMetrics(
     Math.round(
       (REFERENCE_CHROME_TOP_PX / Math.max(chrome.containerHeightPx, 1)) * canvas.height,
     ) + Math.round(layoutMargin * 0.35);
-  const layoutMinY = Math.max(topInsetSvg + Math.round(layoutMargin * 0.35), referenceLayoutMinY);
+  const layoutMinY = Math.max(
+    topInsetSvg + Math.round(layoutMargin * 0.85),
+    referenceLayoutMinY,
+  );
   // Puzzle band runs down to just above the floor pile; the score numeral overlays
   // the bottom edge (HTML/SVG text), so we do not reserve the full counter block.
   const layoutMaxY =
@@ -435,10 +438,7 @@ function getPuzzleMetrics(
     360,
   );
   const length = layout.length;
-  const layoutPlayTopY = Math.max(
-    layoutMinY + Math.round(viewHandleRadius * 0.5),
-    referenceBand.referenceLayoutMinY + Math.round(refViewHandleRadius * 0.5),
-  );
+  const layoutPlayTopY = layoutMinY + Math.round(viewHandleRadius * 0.75);
   const layoutPlayHeight = referenceBand.playHeight;
   // Segments shrink to fit large counts, so keep the snap radius from dwarfing a
   // short segment (which would make every release snap and feel uncontrollable).
@@ -1570,6 +1570,10 @@ export default function App() {
   const physicsFrameRef = useRef<number | null>(null);
   const gestureRef = useRef<{ startedAt: number; start: Point; moved: boolean } | null>(null);
 
+  function clearCheckResult() {
+    setCheckResult(null);
+  }
+
   function restartGame(
     nextSegmentCount = segmentCount,
     nextCanvasSize = canvasSize,
@@ -1595,7 +1599,7 @@ export default function App() {
     setCapState(nextGame.capState);
     setDisconnectionEffects(nextGame.disconnectionEffects);
     setDragState(nextGame.dragState);
-    setCheckResult(null);
+    clearCheckResult();
   }
 
   useEffect(
@@ -1607,7 +1611,7 @@ export default function App() {
     [],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const main = mainRef.current;
     if (!main) {
       return;
@@ -1617,7 +1621,7 @@ export default function App() {
       const mainRect = main.getBoundingClientRect();
       const chromeRect = chromeRef.current?.getBoundingClientRect();
       const chromeBottom = chromeRect?.bottom ?? mainRect.top;
-      const topPx = Math.max(0, chromeBottom - mainRect.top + 20);
+      const topPx = Math.max(0, chromeBottom - mainRect.top + 36);
 
       setCanvasSize((current) => {
         const next = getCanvasSize(mainRect.width, mainRect.height);
@@ -1660,7 +1664,6 @@ export default function App() {
     setCapState(nextGame.capState);
     setDisconnectionEffects(nextGame.disconnectionEffects);
     setDragState(nextGame.dragState);
-    setCheckResult(null);
     handleJoinOrderRef.current = new Map();
     if (physicsFrameRef.current !== null) {
       window.cancelAnimationFrame(physicsFrameRef.current);
@@ -1668,7 +1671,7 @@ export default function App() {
     }
     physicsRef.current = null;
     gestureRef.current = null;
-  }, [segmentCount]);
+  }, [segmentCount, layoutChrome.topPx]);
 
   useEffect(() => {
     const needsAnimation = capState.fallenCaps.some(
@@ -2260,6 +2263,7 @@ export default function App() {
   }
 
   function handleSegmentPointerDown(segmentId: SegmentId, event: React.PointerEvent<SVGElement>) {
+    clearCheckResult();
     if (dragMode === "physics") {
       startPhysicsDrag(segmentId, event, null);
     } else {
@@ -2272,6 +2276,7 @@ export default function App() {
     handle: HandleId,
     event: React.PointerEvent<SVGElement>,
   ) {
+    clearCheckResult();
     if (dragMode === "physics") {
       startPhysicsDrag(segmentId, event, handle);
     } else {
@@ -2491,91 +2496,104 @@ export default function App() {
           ))}
         </svg>
 
-        <div
-          ref={chromeRef}
-          className="pointer-events-none absolute inset-x-10 top-9 z-20 space-y-5 rounded-lg bg-white/95 pb-2 select-none"
-        >
-          <div className="flex items-start justify-between gap-8">
-            <div className="max-w-md pr-4">
-              <h1 className="text-[15px] font-medium uppercase tracking-[0.35em] text-zinc-900">
-                Erdős
-              </h1>
-              <div className="mt-4 space-y-1.5 text-[13px] font-light leading-relaxed text-zinc-400">
-                <p>Connect two handles to release a dot.</p>
-                <p>Quick-tap a piece to disconnect.</p>
-                <p>Drag anywhere to move and reshape.</p>
+        <div className="absolute inset-x-10 top-9 z-20">
+          <div
+            ref={chromeRef}
+            className="pointer-events-none select-none rounded-xl bg-white/95 pb-3"
+          >
+            <h1 className="text-[15px] font-medium uppercase tracking-[0.35em] text-zinc-900">
+              Erdős
+            </h1>
+
+            <div className="mt-4 w-full space-y-1.5 text-[13px] font-light leading-relaxed text-zinc-400">
+              <p>Connect two handles to release a dot.</p>
+              <p>Quick-tap a piece to disconnect.</p>
+              <p>Drag anywhere to move and reshape.</p>
+            </div>
+
+            <div className="pointer-events-auto mt-6">
+              <div className="flex items-baseline justify-between gap-6">
+                <div>
+                  <p className="text-[10px] font-medium uppercase tracking-[0.28em] text-zinc-400">
+                    Pieces
+                  </p>
+                  <p className="mt-1 text-[13px] font-light text-zinc-500">
+                    <span className="font-medium text-zinc-900 tabular-nums">{segmentCount}</span>{" "}
+                    on the board
+                  </p>
+                </div>
+                <p className="text-[11px] font-light text-zinc-400">Tap a number to switch puzzle</p>
+              </div>
+
+              <div className="mt-4 grid w-full grid-cols-11 gap-x-[1rem] gap-y-[0.55rem] tabular-nums text-[12px] leading-none">
+                {SEGMENT_COUNT_OPTIONS.map((count) => {
+                  const isSelected = count === segmentCount;
+
+                  return (
+                    <button
+                      key={count}
+                      type="button"
+                      aria-current={isSelected ? "true" : undefined}
+                      aria-label={`${count} pieces`}
+                      onClick={() => restartGame(count)}
+                      className={[
+                        "text-center transition-colors",
+                        isSelected
+                          ? "font-semibold text-zinc-900 underline decoration-zinc-900 underline-offset-[4px]"
+                          : "font-light text-zinc-400 hover:text-zinc-700",
+                      ].join(" ")}
+                    >
+                      {count}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
-            <div className="shrink-0 px-2 text-[13px] font-light text-zinc-400">
-              <div className="pointer-events-auto flex items-center justify-end gap-5">
+            <div className="pointer-events-auto relative mt-5 text-[13px] font-light text-zinc-400">
+              <div className="flex flex-wrap items-center gap-x-5">
                 <button
                   type="button"
                   onClick={() => restartGame(segmentCount)}
                   className="tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
                 >
-                  Restart
+                  Restart puzzle
                 </button>
 
                 <button
                   type="button"
                   onClick={() => {
-                    const dots = capState.fallenCaps.filter((cap) => cap.status !== "returning").length;
+                    const dots = capState.fallenCaps.filter(
+                      (cap) => cap.status !== "returning",
+                    ).length;
                     setCheckResult({ dots, max: getMaxDots(segmentCount) });
                   }}
                   className="tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
                 >
-                  Check
+                  Check solution
                 </button>
               </div>
 
               {checkResult && (
-                <div className="pointer-events-auto mt-3 flex items-center justify-end gap-3">
+                <p className="pointer-events-auto absolute left-0 top-full mt-1 leading-relaxed whitespace-nowrap">
                   {checkResult.dots >= checkResult.max ? (
-                    <span className="font-medium text-emerald-600">Solved! You cracked it 🎉</span>
+                    <span className="text-emerald-700">Solved! You cracked it.</span>
                   ) : (
-                    <span className="text-zinc-700">
-                      Not solved yet — {checkResult.max - checkResult.dots} more{" "}
-                      {checkResult.max - checkResult.dots === 1 ? "dot" : "dots"} to go.
+                    <span className="text-zinc-500">
+                      {checkResult.max - checkResult.dots} more{" "}
+                      {checkResult.max - checkResult.dots === 1 ? "dot" : "dots"} to collect.
                     </span>
                   )}
                   <button
                     type="button"
                     onClick={() => setCheckResult(null)}
-                    className="text-zinc-400 transition hover:text-zinc-900"
+                    aria-label="Dismiss check result"
+                    className="ml-2 text-zinc-400 transition hover:text-zinc-900"
                   >
                     ×
                   </button>
-                </div>
+                </p>
               )}
-            </div>
-          </div>
-
-          <div className="pointer-events-auto px-2">
-            <span className="mb-2 block text-right tracking-[0.2em] text-[13px] font-light text-zinc-400">
-              Pieces
-            </span>
-            <div className="flex flex-wrap justify-end gap-x-[0.7rem] gap-y-[0.35rem] tabular-nums text-[11px] leading-none tracking-tight">
-              {SEGMENT_COUNT_OPTIONS.map((count) => {
-                const isSelected = count === segmentCount;
-
-                return (
-                  <button
-                    key={count}
-                    type="button"
-                    aria-current={isSelected ? "true" : undefined}
-                    onClick={() => restartGame(count)}
-                    className={[
-                      "min-w-[1.15rem] text-center transition-colors",
-                      isSelected
-                        ? "font-semibold text-zinc-900 underline decoration-zinc-900 underline-offset-[3px]"
-                        : "font-light text-zinc-400 hover:text-zinc-600",
-                    ].join(" ")}
-                  >
-                    {count}
-                  </button>
-                );
-              })}
             </div>
           </div>
         </div>
