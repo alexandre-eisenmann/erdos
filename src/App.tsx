@@ -2116,7 +2116,12 @@ export default function App() {
           );
 
     if (candidates.length === 0) {
-      setSegments(liveSegments);
+      // No new connection, but the physics drag (mouse constraint vs. joints)
+      // can leave joined handles slightly apart — a connected handle stranded
+      // away from its node, its rod then drawn longer than the node gap so the
+      // kernel sits mid-body. Re-normalize against the existing connections to
+      // pull every joint back to clean, equal-length geometry.
+      setSegments(normalizeConnectedGeometry(liveSegments, connections, metrics));
       return;
     }
 
