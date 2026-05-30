@@ -27,9 +27,15 @@ export const PHYSICS = {
   angularDamping: 7,
   settleSpeed: 2,
   settleOmega: 0.05,
-  // Tap-to-disconnect gesture thresholds.
+  // Tap-to-disconnect gesture thresholds. Movement is measured in real screen
+  // pixels (not SVG units) so the gesture behaves the same regardless of how far
+  // the SVG viewBox is scaled — on a phone the board shrinks ~3×, so an
+  // SVG-space threshold would make a finger's natural jitter read as a drag and
+  // silently break tap-to-disconnect. Touch gets a looser tolerance than a mouse
+  // because fingers are imprecise and skin contact shifts as it lifts.
   tapMaxMs: 250,
-  tapMaxMovePx: 5,
+  tapMaxMoveMousePx: 5,
+  tapMaxMoveTouchPx: 14,
   // Spin (rad/s) and slide (px/s) given to a segment tapped free of its joints.
   disconnectKickOmega: 3,
   disconnectKickSpeed: 36,

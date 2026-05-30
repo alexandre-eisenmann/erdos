@@ -58,6 +58,11 @@ export function Segment({
   const bodyHalfLength = halfLength - viewHandleRadius - bodyWidth;
   const outlineWidth = bodyWidth + borderWidth * 2;
   const connectorHalfLength = halfLength - viewHandleRadius;
+  // Invisible hit targets are larger than the drawn shapes so the rods and
+  // handles stay comfortably tappable once the board is scaled down on a phone
+  // (the SVG shrinks ~3×, which would otherwise leave ~11px touch targets).
+  const bodyHitWidth = Math.max(outlineWidth, viewHandleRadius * 2) + 16;
+  const handleHitRadius = viewHandleRadius + 12;
 
   return (
     <g
@@ -80,11 +85,21 @@ export function Segment({
             y1={0}
             x2={bodyHalfLength}
             y2={0}
-            stroke="#262626"
-            strokeWidth={outlineWidth}
+            stroke="transparent"
+            strokeWidth={bodyHitWidth}
             strokeLinecap="round"
             className="cursor-grab"
             onPointerDown={onBodyPointerDown}
+          />
+          <line
+            x1={-bodyHalfLength}
+            y1={0}
+            x2={bodyHalfLength}
+            y2={0}
+            stroke="#262626"
+            strokeWidth={outlineWidth}
+            strokeLinecap="round"
+            pointerEvents="none"
           />
           <line
             x1={-bodyHalfLength}
@@ -104,17 +119,25 @@ export function Segment({
           const x = handle === "start" ? -halfLength : halfLength;
 
           return (
-            <circle
-              key={handle}
-              cx={x}
-              cy={0}
-              r={viewHandleRadius}
-              fill="transparent"
-              stroke="#262626"
-              strokeWidth={borderWidth}
-              className="cursor-grab"
-              onPointerDown={(event) => onHandlePointerDown(handle, event)}
-            />
+            <g key={handle}>
+              <circle
+                cx={x}
+                cy={0}
+                r={handleHitRadius}
+                fill="transparent"
+                className="cursor-grab"
+                onPointerDown={(event) => onHandlePointerDown(handle, event)}
+              />
+              <circle
+                cx={x}
+                cy={0}
+                r={viewHandleRadius}
+                fill="transparent"
+                stroke="#262626"
+                strokeWidth={borderWidth}
+                pointerEvents="none"
+              />
+            </g>
           );
         })}
 

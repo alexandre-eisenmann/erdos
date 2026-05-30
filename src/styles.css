@@ -9,8 +9,20 @@ body,
   height: 100%;
   height: 100dvh;
   overflow-x: hidden;
+  /* Stop iOS rubber-band scrolling from dragging the fixed game board around. */
+  overscroll-behavior: none;
 }
 
 body {
   margin: 0;
+  /* This is a drag puzzle, not a document: suppress the grey tap-flash, the
+     long-press callout/selection menu, and accidental text selection so a slow
+     press-and-drag on a rod never turns into a text/image selection gesture.
+     touch-action: manipulation also drops the 300ms double-tap-zoom delay on
+     the chrome controls (the SVG itself uses touch-action: none). */
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
 }

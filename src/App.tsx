@@ -1572,7 +1572,14 @@ export default function App() {
   // without re-subscribing; React state only mirrors poses for rendering.
   const physicsRef = useRef<PhysicsRuntime | null>(null);
   const physicsFrameRef = useRef<number | null>(null);
-  const gestureRef = useRef<{ startedAt: number; start: Point; moved: boolean } | null>(null);
+  const gestureRef = useRef<{
+    startedAt: number;
+    // Pointer-down position in client (screen) pixels — movement is measured
+    // here, not in SVG units, so tap detection is scale-independent on mobile.
+    startClient: Point;
+    moveTolerancePx: number;
+    moved: boolean;
+  } | null>(null);
 
   function clearCheckResult() {
     setCheckResult(null);
@@ -2131,7 +2138,15 @@ export default function App() {
       pointer: grabPoint,
       mode: "drag",
     };
-    gestureRef.current = { startedAt: performance.now(), start: grabPoint, moved: false };
+    const isCoarsePointer = event.pointerType === "touch" || event.pointerType === "pen";
+    gestureRef.current = {
+      startedAt: performance.now(),
+      startClient: { x: event.clientX, y: event.clientY },
+      moveTolerancePx: isCoarsePointer
+        ? PHYSICS.tapMaxMoveTouchPx
+        : PHYSICS.tapMaxMoveMousePx,
+      moved: false,
+    };
     setDragState({ type: "physics", segmentId });
     startPhysicsLoop();
   }
@@ -2147,8 +2162,14 @@ export default function App() {
     runtime.pointer = pointer;
 
     const gesture = gestureRef.current;
-    if (gesture && !gesture.moved && getDistance(pointer, gesture.start) > PHYSICS.tapMaxMovePx) {
-      gesture.moved = true;
+    if (gesture && !gesture.moved) {
+      const movedPx = Math.hypot(
+        event.clientX - gesture.startClient.x,
+        event.clientY - gesture.startClient.y,
+      );
+      if (movedPx > gesture.moveTolerancePx) {
+        gesture.moved = true;
+      }
     }
   }
 
@@ -2311,6 +2332,57 @@ export default function App() {
     }
   }
 
+  // Restart / Check actions, grouped with whichever pieces control is on screen
+  // (the dropdown on mobile, the number grid on desktop). Rendered in both
+  // placements; only one wrapper is visible per breakpoint.
+  const actions = (
+    <div className="pointer-events-auto relative w-fit">
+      <div className="flex items-center gap-2.5">
+        <button
+          type="button"
+          onClick={() => restartGame(segmentCount)}
+          className="inline-flex min-h-[38px] items-center rounded-full px-3.5 text-[13px] tracking-wide text-zinc-500 transition active:scale-[0.97] hover:bg-zinc-100 hover:text-zinc-900"
+        >
+          Restart
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            const dots = capState.fallenCaps.filter(
+              (cap) => cap.status !== "returning",
+            ).length;
+            setCheckResult({ dots, max: getMaxDots(segmentCount) });
+          }}
+          className="inline-flex min-h-[38px] items-center rounded-full bg-zinc-100 px-4 text-[13px] font-medium tracking-wide text-zinc-700 transition active:scale-[0.97] hover:bg-zinc-200 hover:text-zinc-900"
+        >
+          Check solution
+        </button>
+      </div>
+
+      {checkResult && (
+        <p className="pointer-events-auto absolute left-1/2 top-full mt-2 -translate-x-1/2 text-[13px] font-light leading-relaxed whitespace-nowrap">
+          {checkResult.dots >= checkResult.max ? (
+            <span className="text-emerald-700">Solved! You cracked it.</span>
+          ) : (
+            <span className="text-zinc-500">
+              {checkResult.max - checkResult.dots} more{" "}
+              {checkResult.max - checkResult.dots === 1 ? "dot" : "dots"} to collect.
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => setCheckResult(null)}
+            aria-label="Dismiss check result"
+            className="ml-2 text-zinc-400 transition hover:text-zinc-900"
+          >
+            ×
+          </button>
+        </p>
+      )}
+    </div>
+  );
+
   return (
     <main
       ref={mainRef}
@@ -2349,6 +2421,9 @@ export default function App() {
           <p>Drag anywhere to move and reshape.</p>
         </div>
 
+        {/* Mobile: actions below the instructions, centered horizontally. */}
+        <div className="mt-5 flex justify-center md:hidden">{actions}</div>
+
         <div className="pointer-events-auto mt-4 hidden md:block md:mt-6">
           <div className="flex items-baseline justify-between gap-6">
             <div>
@@ -2386,52 +2461,9 @@ export default function App() {
               );
             })}
           </div>
-        </div>
 
-        <div className="pointer-events-auto relative mt-3 text-[13px] font-light text-zinc-400 md:mt-5">
-          <div className="flex flex-wrap items-center gap-x-5">
-            <button
-              type="button"
-              onClick={() => restartGame(segmentCount)}
-              className="tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
-            >
-              Restart puzzle
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                const dots = capState.fallenCaps.filter(
-                  (cap) => cap.status !== "returning",
-                ).length;
-                setCheckResult({ dots, max: getMaxDots(segmentCount) });
-              }}
-              className="tracking-wide underline-offset-4 transition hover:text-zinc-900 hover:underline"
-            >
-              Check solution
-            </button>
-          </div>
-
-          {checkResult && (
-            <p className="pointer-events-auto absolute left-0 top-full mt-1 leading-relaxed whitespace-nowrap">
-              {checkResult.dots >= checkResult.max ? (
-                <span className="text-emerald-700">Solved! You cracked it.</span>
-              ) : (
-                <span className="text-zinc-500">
-                  {checkResult.max - checkResult.dots} more{" "}
-                  {checkResult.max - checkResult.dots === 1 ? "dot" : "dots"} to collect.
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => setCheckResult(null)}
-                aria-label="Dismiss check result"
-                className="ml-2 text-zinc-400 transition hover:text-zinc-900"
-              >
-                ×
-              </button>
-            </p>
-          )}
+          {/* Desktop: actions sit right under the number-grid pieces choice. */}
+          <div className="mt-5">{actions}</div>
         </div>
       </div>
 
