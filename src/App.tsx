@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getSegmentHandlePoint, Segment, type Point, type SegmentPose } from "./Segment";
 import {
   createBody,
@@ -1104,6 +1104,57 @@ function normalizeConnectedGeometry(
   });
 }
 
+// The on-screen position of every handle, with joined handles collapsed onto
+// their shared joint node. Drawing from these points guarantees a joint is
+// visually closed even when the length solver can't fully satisfy a
+// closed-loop assembly — the rod length flexes instead of the joint gaping
+// (which would strand kernels on empty-looking handles).
+function getRenderedHandlePoints(
+  segments: PuzzleSegment[],
+  connections: Connection[],
+  length: number,
+): Map<string, Point> {
+  const { nodes, nodeKeyByHandleKey } = getConstraintGraph(segments, connections, [], length);
+  const nodeByKey = new Map(nodes.map((node) => [node.key, node]));
+  const points = new Map<string, Point>();
+
+  for (const segment of segments) {
+    for (const handle of ["start", "end"] as const) {
+      const key = getHandleKey(segment.id, handle);
+      const nodeKey = nodeKeyByHandleKey.get(key);
+      const node = nodeKey ? nodeByKey.get(nodeKey) : undefined;
+      points.set(
+        key,
+        node ? node.point : getSegmentHandlePoint(segment.pose, length, handle),
+      );
+    }
+  }
+
+  return points;
+}
+
+// Per-segment draw pose/length derived from the shared joint nodes. A free
+// segment renders exactly as its own pose (nominal length); a connected one is
+// drawn end-to-end between its joint nodes so the joints meet.
+function getRenderPose(
+  segment: PuzzleSegment,
+  handlePoints: Map<string, Point>,
+  length: number,
+): { pose: SegmentPose; length: number } {
+  const start =
+    handlePoints.get(getHandleKey(segment.id, "start")) ??
+    getSegmentHandlePoint(segment.pose, length, "start");
+  const end =
+    handlePoints.get(getHandleKey(segment.id, "end")) ??
+    getSegmentHandlePoint(segment.pose, length, "end");
+  const distance = getDistance(start, end);
+
+  return {
+    pose: getPoseFromHandles(start, end),
+    length: distance > 1 ? distance : length,
+  };
+}
+
 function wouldCreateDuplicateSegmentBridge(
   connections: Connection[],
   candidate: SnapCandidate,
@@ -1537,10 +1588,9 @@ const SHOW_DIAGNOSTICS = true;
 type StateProblem = { key: string; point: Point; reason: string };
 
 function findStateProblems(
-  segments: PuzzleSegment[],
   connections: Connection[],
   hiddenCapKeys: string[],
-  length: number,
+  handlePoints: Map<string, Point>,
 ): StateProblem[] {
   const problems: StateProblem[] = [];
   const seenNodes = new Set<string>();
@@ -1561,8 +1611,8 @@ function findStateProblems(
       seenNodes.add(nodeKey);
 
       const points = members
-        .map((member) => getHandlePoint(segments, member, length))
-        .filter((point): point is Point => point !== null);
+        .map((member) => handlePoints.get(getHandleKey(member.segmentId, member.handle)))
+        .filter((point): point is Point => point !== undefined);
       let maxGap = 0;
       for (let i = 0; i < points.length; i += 1) {
         for (let j = i + 1; j < points.length; j += 1) {
@@ -1571,7 +1621,7 @@ function findStateProblems(
       }
       if (maxGap > 6) {
         for (const member of members) {
-          const point = getHandlePoint(segments, member, length);
+          const point = handlePoints.get(getHandleKey(member.segmentId, member.handle));
           if (point) {
             problems.push({
               key: getHandleKey(member.segmentId, member.handle),
@@ -1588,7 +1638,7 @@ function findStateProblems(
     const handle = parseHandleKey(key);
     const members = getConnectedNodeMembers(connections, handle.segmentId, handle.handle);
     if (members.length < 2) {
-      const point = getHandlePoint(segments, handle, length);
+      const point = handlePoints.get(key);
       if (point) {
         problems.push({ key, point, reason: "hidden-but-free" });
       }
@@ -2453,11 +2503,18 @@ export default function App() {
     }
   }
 
+  // Handle positions with joined handles collapsed onto their shared node, so
+  // segments can be drawn with their joints always closed.
+  const renderedHandlePoints = useMemo(
+    () => getRenderedHandlePoints(segments, connections, metrics.length),
+    [segments, connections, metrics.length],
+  );
+
   // Diagnostic: only when not actively dragging (joints are legitimately open
   // mid-drag). Marks broken handles red and dumps the state to the console.
   const stateProblems =
     SHOW_DIAGNOSTICS && !dragState
-      ? findStateProblems(segments, connections, capState.hiddenCapKeys, metrics.length)
+      ? findStateProblems(connections, capState.hiddenCapKeys, renderedHandlePoints)
       : [];
   const problemSignature = stateProblems.map((problem) => `${problem.key}:${problem.reason}`).join(",");
   useEffect(() => {
@@ -2637,11 +2694,13 @@ export default function App() {
           })}
 
           {/* Pass 1: bodies, in segment z-order. */}
-          {segments.map((segment) => (
+          {segments.map((segment) => {
+            const rp = getRenderPose(segment, renderedHandlePoints, metrics.length);
+            return (
             <Segment
               key={`${segment.id}-body`}
-              pose={segment.pose}
-              length={metrics.length}
+              pose={rp.pose}
+              length={rp.length}
               bodyWidth={metrics.bodyWidth}
               handleRadius={metrics.handleRadius}
               color={segment.color}
@@ -2653,14 +2712,17 @@ export default function App() {
                 handleSegmentHandlePointerDown(segment.id, handle, event)
               }
             />
-          ))}
+            );
+          })}
 
           {/* Pass 2: black handle rings, in segment z-order. */}
-          {segments.map((segment) => (
+          {segments.map((segment) => {
+            const rp = getRenderPose(segment, renderedHandlePoints, metrics.length);
+            return (
             <Segment
               key={`${segment.id}-rings`}
-              pose={segment.pose}
-              length={metrics.length}
+              pose={rp.pose}
+              length={rp.length}
               bodyWidth={metrics.bodyWidth}
               handleRadius={metrics.handleRadius}
               color={segment.color}
@@ -2672,17 +2734,20 @@ export default function App() {
                 handleSegmentHandlePointerDown(segment.id, handle, event)
               }
             />
-          ))}
+            );
+          })}
 
           {/* Pass 3: colored kernels, always drawn after all rings so the
               node-owned kernel sits visually on top of any ring stroke at the
               joint. Visibility per handle comes from capState.hiddenCapKeys,
               which is owned by the node data structure (not by z-index). */}
-          {segments.map((segment) => (
+          {segments.map((segment) => {
+            const rp = getRenderPose(segment, renderedHandlePoints, metrics.length);
+            return (
             <Segment
               key={`${segment.id}-caps`}
-              pose={segment.pose}
-              length={metrics.length}
+              pose={rp.pose}
+              length={rp.length}
               bodyWidth={metrics.bodyWidth}
               handleRadius={metrics.handleRadius}
               color={segment.color}
@@ -2700,7 +2765,8 @@ export default function App() {
                 handleSegmentHandlePointerDown(segment.id, handle, event)
               }
             />
-          ))}
+            );
+          })}
 
           {capState.fallenCaps.map((cap) => (
             <circle
