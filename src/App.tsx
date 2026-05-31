@@ -1112,30 +1112,25 @@ function wouldCreateDuplicateSegmentBridge(
     return true;
   }
 
-  // Forbid snapping a handle into a node that already holds the dragged
-  // segment's opposite handle: that would loop one segment back onto itself
-  // (both handles in one node), which is geometrically degenerate and makes
-  // the length-constraint solver fling the assembly off-canvas.
-  const oppositeHandle = getOppositeHandle(candidate.dragged.handle);
-  const targetNodeMembers = getConnectedNodeMembers(
-    connections,
-    candidate.target.segmentId,
-    candidate.target.handle,
-  );
-  if (
-    targetNodeMembers.some(
-      (member) =>
-        member.segmentId === candidate.dragged.segmentId &&
-        member.handle === oppositeHandle,
-    )
-  ) {
-    return true;
-  }
-
   const nextConnections = [...connections, getConnectionFromSnapCandidate(candidate)];
   const pairOwners = new Map<string, SegmentId>();
 
   for (const segmentId of getSegmentIdsFromConnections(nextConnections)) {
+    // Forbid any join that would put a segment's two handles into the SAME
+    // node (a self-loop): the rod's ends would be pinned to one point yet must
+    // stay a rod-length apart — impossible, so it renders as a gaping joint
+    // with stranded empty handles. This checks the merged graph directly, so it
+    // catches the case regardless of which side (dragged, target, or a third
+    // bridging segment) closes the loop — unlike a one-directional handle test.
+    if (
+      isHandleConnected(nextConnections, segmentId, "start") &&
+      isHandleConnected(nextConnections, segmentId, "end") &&
+      getNodeKey(nextConnections, segmentId, "start") ===
+        getNodeKey(nextConnections, segmentId, "end")
+    ) {
+      return true;
+    }
+
     const pairKey = getSegmentNodePairKey(nextConnections, segmentId);
     if (!pairKey) {
       continue;
