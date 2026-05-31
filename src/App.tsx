@@ -391,7 +391,7 @@ function getPuzzleMetrics(
   const pileDotRadius = viewHandleRadius;
   const svgScale = getSvgUniformScale(canvas, chrome);
   const pileCounterFontSize = PILE_COUNTER_FONT_PX / svgScale;
-  const bottomInset = Math.max(28, Math.round(canvas.height * 0.035));
+  const bottomInset = Math.max(48, Math.round(canvas.height * 0.06));
   const pileToCounterGap = Math.max(14, Math.round(pileDotRadius * 1.5));
   const pileCounterY = canvas.height - bottomInset - pileCounterFontSize * 0.32;
   const pileBaseY =
