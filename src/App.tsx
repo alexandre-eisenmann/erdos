@@ -1663,6 +1663,10 @@ export default function App() {
   // the green ring so the drawn catch area matches what actually snaps.
   const dragSnapRadiusRef = useRef<number | null>(null);
   const TOUCH_SNAP_RADIUS_SCALE = 1.6;
+  // True once the player has interacted with the board. While false, a viewport
+  // resize may safely re-center the starting layout; once true, a resize must
+  // leave the in-progress game untouched (never wipe connections/poses).
+  const boardTouchedRef = useRef(false);
 
   function clearCheckResult() {
     setCheckResult(null);
@@ -1680,6 +1684,7 @@ export default function App() {
     }
     physicsRef.current = null;
     gestureRef.current = null;
+    boardTouchedRef.current = false;
     const nextGame = createInitialGameState(
       nextSegmentCount,
       nextCanvasSize,
@@ -1750,6 +1755,14 @@ export default function App() {
     setMetrics(getPuzzleMetrics(segmentCount, canvasSize, layoutChrome));
   }, [canvasSize, layoutChrome]);
 
+  // Rebuild the board ONLY when the piece count changes (a deliberate new
+  // puzzle). It must NOT depend on canvas/layout size: a viewport resize — e.g.
+  // the mobile toolbar showing/hiding when a fast drag reaches the screen edge —
+  // would otherwise wipe connections and the join-order map mid-play. With an
+  // empty join-order map, computeHiddenCapKeys can't pick a joint's visible
+  // owner, so every joined handle's kernel hides (the "empty handles" bug).
+  // Layout is reference-based, so a resize only needs to rescale the SVG, which
+  // the metrics effect above already handles without touching game state.
   useEffect(() => {
     const nextGame = createInitialGameState(segmentCount, canvasSize, layoutChrome);
     setMetrics(nextGame.metrics);
@@ -1766,8 +1779,23 @@ export default function App() {
     }
     physicsRef.current = null;
     gestureRef.current = null;
+    boardTouchedRef.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [segmentCount]);
+
+  // Non-destructive re-layout on resize: only while the board is still in its
+  // pristine starting state. This re-centers the initial grid once the real
+  // viewport is measured (default vs measured differ by the chrome height)
+  // without ever disturbing an in-progress game.
+  useEffect(() => {
+    if (boardTouchedRef.current) {
+      return;
+    }
+    const nextGame = createInitialGameState(segmentCount, canvasSize, layoutChrome);
+    setMetrics(nextGame.metrics);
+    setSegments(nextGame.segments);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    segmentCount,
     canvasSize.width,
     canvasSize.height,
     layoutChrome.containerWidthPx,
@@ -2190,6 +2218,7 @@ export default function App() {
     }
 
     event.currentTarget.setPointerCapture(event.pointerId);
+    boardTouchedRef.current = true;
     stopPhysicsLoop();
 
     const grabPoint = getSvgPoint(svg, event.clientX, event.clientY);
