@@ -1526,6 +1526,78 @@ function reconcileCaps(
   return { hiddenCapKeys: [...hidden], fallenCaps };
 }
 
+// --- Temporary diagnostic --------------------------------------------------
+// Detects the "empty handle that isn't really free" state so a reproduction
+// surfaces the exact cause. Two failure modes are flagged:
+//   open-joint      handles the graph treats as one joint are drawn apart.
+//   hidden-but-free a kernel is hidden on a handle in no multi-member joint.
+// Remove once the root cause is fixed.
+const SHOW_DIAGNOSTICS = true;
+
+type StateProblem = { key: string; point: Point; reason: string };
+
+function findStateProblems(
+  segments: PuzzleSegment[],
+  connections: Connection[],
+  hiddenCapKeys: string[],
+  length: number,
+): StateProblem[] {
+  const problems: StateProblem[] = [];
+  const seenNodes = new Set<string>();
+
+  for (const connection of connections) {
+    for (const handle of [connection.from, connection.to]) {
+      const members = getConnectedNodeMembers(connections, handle.segmentId, handle.handle);
+      if (members.length < 2) {
+        continue;
+      }
+      const nodeKey = members
+        .map((member) => getHandleKey(member.segmentId, member.handle))
+        .sort()
+        .join("|");
+      if (seenNodes.has(nodeKey)) {
+        continue;
+      }
+      seenNodes.add(nodeKey);
+
+      const points = members
+        .map((member) => getHandlePoint(segments, member, length))
+        .filter((point): point is Point => point !== null);
+      let maxGap = 0;
+      for (let i = 0; i < points.length; i += 1) {
+        for (let j = i + 1; j < points.length; j += 1) {
+          maxGap = Math.max(maxGap, getDistance(points[i], points[j]));
+        }
+      }
+      if (maxGap > 6) {
+        for (const member of members) {
+          const point = getHandlePoint(segments, member, length);
+          if (point) {
+            problems.push({
+              key: getHandleKey(member.segmentId, member.handle),
+              point,
+              reason: `open-joint gap=${Math.round(maxGap)}`,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  for (const key of hiddenCapKeys) {
+    const handle = parseHandleKey(key);
+    const members = getConnectedNodeMembers(connections, handle.segmentId, handle.handle);
+    if (members.length < 2) {
+      const point = getHandlePoint(segments, handle, length);
+      if (point) {
+        problems.push({ key, point, reason: "hidden-but-free" });
+      }
+    }
+  }
+
+  return problems;
+}
+
 export default function App() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const mainRef = useRef<HTMLElement | null>(null);
@@ -2352,6 +2424,27 @@ export default function App() {
     }
   }
 
+  // Diagnostic: only when not actively dragging (joints are legitimately open
+  // mid-drag). Marks broken handles red and dumps the state to the console.
+  const stateProblems =
+    SHOW_DIAGNOSTICS && !dragState
+      ? findStateProblems(segments, connections, capState.hiddenCapKeys, metrics.length)
+      : [];
+  const problemSignature = stateProblems.map((problem) => `${problem.key}:${problem.reason}`).join(",");
+  useEffect(() => {
+    if (problemSignature.length === 0) {
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.warn("[erdos diagnostic] inconsistent state", {
+      problems: stateProblems,
+      connections,
+      hiddenCapKeys: capState.hiddenCapKeys,
+      poses: segments.map((segment) => ({ id: segment.id, pose: segment.pose })),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [problemSignature]);
+
   // Restart / Check actions, grouped with whichever pieces control is on screen
   // (the dropdown on mobile, the number grid on desktop). Rendered in both
   // placements; only one wrapper is visible per breakpoint.
@@ -2642,6 +2735,42 @@ export default function App() {
               </circle>
             </g>
           ))}
+
+          {stateProblems.map((problem, index) => (
+            <g key={`diag-${problem.key}-${index}`} pointerEvents="none">
+              <circle
+                cx={problem.point.x}
+                cy={problem.point.y}
+                r={metrics.viewHandleRadius + 10}
+                fill="none"
+                stroke="#ef4444"
+                strokeWidth={5}
+              />
+              <text
+                x={problem.point.x}
+                y={problem.point.y + metrics.viewHandleRadius + 30}
+                fill="#ef4444"
+                textAnchor="middle"
+                fontSize={22}
+                fontWeight={700}
+              >
+                {problem.reason}
+              </text>
+            </g>
+          ))}
+
+          {stateProblems.length > 0 && (
+            <text
+              x={24}
+              y={48}
+              fill="#ef4444"
+              fontSize={34}
+              fontWeight={800}
+              pointerEvents="none"
+            >
+              DIAGNOSTIC: {stateProblems.length} broken handle(s)
+            </text>
+          )}
         </svg>
       </div>
     </main>
