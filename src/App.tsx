@@ -2789,16 +2789,30 @@ export default function App() {
           ))}
 
           {stateProblems.length > 0 && (
-            <text
-              x={24}
-              y={48}
-              fill="#ef4444"
-              fontSize={34}
-              fontWeight={800}
-              pointerEvents="none"
-            >
-              DIAGNOSTIC: {stateProblems.length} broken handle(s)
-            </text>
+            <g pointerEvents="none" fontFamily="monospace">
+              <text x={24} y={48} fill="#ef4444" fontSize={34} fontWeight={800}>
+                DIAGNOSTIC: {stateProblems.length} broken handle(s)
+              </text>
+              {[
+                `conns: ${connections
+                  .map(
+                    (connection) =>
+                      `${connection.from.segmentId}${connection.from.handle[0]}-${connection.to.segmentId}${connection.to.handle[0]}`,
+                  )
+                  .join(" ")}`,
+                `hidden: ${capState.hiddenCapKeys.join(" ")}`,
+                ...segments.map(
+                  (segment) =>
+                    `#${segment.id} ${Math.round(segment.pose.center.x)},${Math.round(
+                      segment.pose.center.y,
+                    )} ${Math.round((segment.pose.angle * 180) / Math.PI)}d`,
+                ),
+              ].map((line, index) => (
+                <text key={`dump-${index}`} x={24} y={92 + index * 34} fill="#ef4444" fontSize={26}>
+                  {line}
+                </text>
+              ))}
+            </g>
           )}
         </svg>
       </div>
