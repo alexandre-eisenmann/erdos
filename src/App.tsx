@@ -2230,9 +2230,17 @@ export default function App() {
 
     if (candidates.length === 0) {
       // No new connection, but the physics drag can leave joined handles
-      // slightly apart. Settle the joints on the rigid bodies to close those
-      // gaps without ever shortening a rod.
-      setSegments(settleGeometry(liveSegments, connections, metrics));
+      // apart. Settle rod lengths on the rigid bodies, then merge joined
+      // handles into shared nodes so every joint closes exactly — the rigid
+      // solver alone leaves residual gaps on closed loops, which strands
+      // kernels on handles that look empty but are still joined.
+      setSegments(
+        normalizeConnectedGeometry(
+          settleGeometry(liveSegments, connections, metrics),
+          connections,
+          metrics,
+        ),
+      );
       return;
     }
 
@@ -2251,7 +2259,13 @@ export default function App() {
       ...connections,
       ...candidates.map(getConnectionFromSnapCandidate),
     ];
-    setSegments(settleGeometry(liveSegments, nextConnections, metrics));
+    setSegments(
+      normalizeConnectedGeometry(
+        settleGeometry(liveSegments, nextConnections, metrics),
+        nextConnections,
+        metrics,
+      ),
+    );
     setConnections(nextConnections);
     setCapState((currentCapState) =>
       reconcileCaps(
