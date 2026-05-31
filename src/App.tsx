@@ -2397,7 +2397,7 @@ export default function App() {
             Erdős
           </h1>
 
-          <label className="pointer-events-auto flex items-center gap-2 md:hidden">
+          <label className="pointer-events-auto flex items-center gap-2">
             <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-zinc-400">
               Pieces
             </span>
@@ -2421,50 +2421,9 @@ export default function App() {
           <p>Drag anywhere to move and reshape.</p>
         </div>
 
-        {/* Mobile: actions below the instructions, centered horizontally. */}
-        <div className="mt-5 flex justify-center md:hidden">{actions}</div>
-
-        <div className="pointer-events-auto mt-4 hidden md:block md:mt-6">
-          <div className="flex items-baseline justify-between gap-6">
-            <div>
-              <p className="text-[10px] font-medium uppercase tracking-[0.28em] text-zinc-400">
-                Pieces
-              </p>
-              <p className="mt-1 text-[13px] font-light text-zinc-500">
-                <span className="font-medium text-zinc-900 tabular-nums">{segmentCount}</span>{" "}
-                on the board
-              </p>
-            </div>
-            <p className="text-[11px] font-light text-zinc-400">Tap a number to switch puzzle</p>
-          </div>
-
-          <div className="mt-4 grid w-full grid-cols-11 gap-x-[1rem] gap-y-[0.55rem] tabular-nums text-[12px] leading-none">
-            {SEGMENT_COUNT_OPTIONS.map((count) => {
-              const isSelected = count === segmentCount;
-
-              return (
-                <button
-                  key={count}
-                  type="button"
-                  aria-current={isSelected ? "true" : undefined}
-                  aria-label={`${count} pieces`}
-                  onClick={() => restartGame(count)}
-                  className={[
-                    "text-center transition-colors",
-                    isSelected
-                      ? "font-semibold text-zinc-900 underline decoration-zinc-900 underline-offset-[4px]"
-                      : "font-light text-zinc-400 hover:text-zinc-700",
-                  ].join(" ")}
-                >
-                  {count}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Desktop: actions sit right under the number-grid pieces choice. */}
-          <div className="mt-5">{actions}</div>
-        </div>
+        {/* Actions below the instructions, centered horizontally. Same clean
+            layout on every breakpoint. */}
+        <div className="mt-5 flex justify-center">{actions}</div>
       </div>
 
       <div ref={gameRef} className="relative min-h-0 w-full flex-1">
