@@ -1580,6 +1580,17 @@ export default function App() {
     moveTolerancePx: number;
     moved: boolean;
   } | null>(null);
+  // The snap candidates currently drawn as the green "connect" indicator. Release
+  // commits exactly these (WYSIWYG) rather than recomputing from the pointer at
+  // pointerup — on touch the finger rolls as it lifts, firing a final move that
+  // would otherwise snap the connection to a different handle than the one shown.
+  const liveSnapRef = useRef<SnapCandidate[]>([]);
+  // Effective snap radius for the active drag: widened for touch/pen so a fat
+  // finger doesn't need pixel-precise aim to catch a handle. null when idle
+  // (fall back to metrics.snapRadius). Read in the rAF loop and while rendering
+  // the green ring so the drawn catch area matches what actually snaps.
+  const dragSnapRadiusRef = useRef<number | null>(null);
+  const TOUCH_SNAP_RADIUS_SCALE = 1.6;
 
   function clearCheckResult() {
     setCheckResult(null);
@@ -2032,7 +2043,11 @@ export default function App() {
     }
 
     const loopConnections = connections;
-    const loopMetrics = metrics;
+    // Use the (possibly touch-widened) snap radius for catch detection.
+    const loopMetrics = {
+      ...metrics,
+      snapRadius: dragSnapRadiusRef.current ?? metrics.snapRadius,
+    };
     const loopSegments = segments;
 
     const frame = () => {
@@ -2070,6 +2085,7 @@ export default function App() {
                 loopConnections,
                 loopMetrics,
               );
+        liveSnapRef.current = snapResult;
         setSnapCandidates(snapResult);
         physicsFrameRef.current = window.requestAnimationFrame(frame);
       } else if (moving) {
@@ -2138,7 +2154,11 @@ export default function App() {
       pointer: grabPoint,
       mode: "drag",
     };
+    liveSnapRef.current = [];
     const isCoarsePointer = event.pointerType === "touch" || event.pointerType === "pen";
+    dragSnapRadiusRef.current = isCoarsePointer
+      ? metrics.snapRadius * TOUCH_SNAP_RADIUS_SCALE
+      : metrics.snapRadius;
     gestureRef.current = {
       startedAt: performance.now(),
       startClient: { x: event.clientX, y: event.clientY },
@@ -2177,6 +2197,7 @@ export default function App() {
     const runtime = physicsRef.current;
     const gesture = gestureRef.current;
     gestureRef.current = null;
+    dragSnapRadiusRef.current = null;
 
     if (!runtime || runtime.mode !== "drag") {
       setDragState(null);
@@ -2202,25 +2223,10 @@ export default function App() {
       return;
     }
 
-    const componentIds = [...runtime.bodyById.keys()];
-    const grabbedHandle = runtime.grab?.grabbedHandle ?? null;
-    const candidates =
-      grabbedHandle && runtime.grab
-        ? findPointerHandleSnap(
-            liveSegments,
-            runtime.grab.segmentId,
-            grabbedHandle,
-            runtime.pointer,
-            connections,
-            metrics,
-          )
-        : findClosestComponentSnap(
-            liveSegments,
-            componentIds,
-            runtime.pointer,
-            connections,
-            metrics,
-          );
+    // Commit exactly the snap the user last saw highlighted. Recomputing here
+    // from runtime.pointer would let a touch lift-off wobble retarget the joint.
+    const candidates = liveSnapRef.current;
+    liveSnapRef.current = [];
 
     if (candidates.length === 0) {
       // No new connection, but the physics drag can leave joined handles
@@ -2456,7 +2462,11 @@ export default function App() {
             </g>
           )}
 
-          {snapCandidates.map((snapCandidate) => (
+          {snapCandidates.map((snapCandidate) => {
+            // Draw the catch area at the same radius the loop is snapping with,
+            // so the green halo honestly shows what will connect.
+            const ringRadius = dragSnapRadiusRef.current ?? metrics.snapRadius;
+            return (
             <g
               key={`${snapCandidate.dragged.handle}-${snapCandidate.target.segmentId}-${snapCandidate.target.handle}`}
               pointerEvents="none"
@@ -2464,7 +2474,7 @@ export default function App() {
               <circle
                 cx={snapCandidate.target.point.x}
                 cy={snapCandidate.target.point.y}
-                r={metrics.snapRadius}
+                r={ringRadius}
                 fill="#22c55e"
                 opacity={0.14}
               />
@@ -2478,7 +2488,7 @@ export default function App() {
               />
               <text
                 x={snapCandidate.target.point.x}
-                y={snapCandidate.target.point.y - metrics.snapRadius - 8}
+                y={snapCandidate.target.point.y - ringRadius - 8}
                 fill="#15803d"
                 textAnchor="middle"
                 className="select-none font-bold"
@@ -2487,7 +2497,8 @@ export default function App() {
                 connect
               </text>
             </g>
-          ))}
+            );
+          })}
 
           {/* Pass 1: bodies, in segment z-order. */}
           {segments.map((segment) => (
